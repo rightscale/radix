@@ -8,7 +8,7 @@ up:
 	redis-cli -p 7001 cluster addslots $$(seq 8192 16383)
 
 down:
-	ps -o pid -o cmd | \
+	ps -a -o pid -o cmd | \
 		grep redis-server | \
 		grep :700[0-9] | \
 		awk '{print $$1}' | \

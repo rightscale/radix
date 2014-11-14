@@ -197,9 +197,7 @@ func (c *Cluster) Cmd(cmd string, args ...interface{}) *redis.Reply {
 // clientCmd is separated out from Cmd mainly to aid in testing
 func (c *Cluster) clientCmd(
 	client *redis.Client, cmd string, args ...interface{},
-) (
-	*redis.Reply,
-) {
+) *redis.Reply {
 	r := client.Cmd(cmd, args...)
 	if err := r.Err; err != nil {
 		msg := err.Error()
