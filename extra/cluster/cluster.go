@@ -64,14 +64,15 @@ type Cluster struct {
 }
 
 // NewCluster will perform the following steps to initialize:
-// * Connect to the node given in the arguments. This node will be the fallback
-//   client for the lifetime of this object.
 //
-// * The fallback client is used to call CLUSTER SLOTS. The return from this is
-//   used to build a mapping of slot number -> connection. At the same time any
-//   new connections which need to be made are created here.
+// - Connect to the node given in the arguments. This node will be the fallback
+// client for the lifetime of this object.
 //
-// * *Cluster is returned
+// - The fallback client is used to call CLUSTER SLOTS. The return from this is
+// used to build a mapping of slot number -> connection. At the same time any
+// new connections which need to be made are created here.
+//
+// - *Cluster is returned
 //
 // At this point the Cluster has a complete view of the cluster's topology and
 // can immediately start performing commands with (theoretically) zero slot
@@ -173,10 +174,10 @@ func (c *Cluster) Reset() error {
 }
 
 // Cmd performs the given command on the correct cluster node and gives back the
-// command's reply. The command *must* have a key parameter (len(args) >= 1). If
-// any MOVED or ASK errors are returned they will be transparently handled by
-// this method. This method will also increment the Misses field on the Cluster
-// struct whenever a redirection occurs
+// command's reply. The command *must* have a key parameter (i.e. len(args) >=
+// 1). If any MOVED or ASK errors are returned they will be transparently
+// handled by this method. This method will also increment the Misses field on
+// the Cluster struct whenever a redirection occurs
 func (c *Cluster) Cmd(cmd string, args ...interface{}) *redis.Reply {
 	if len(args) < 1 {
 		return errorReply(BadCmdNoKey)
@@ -270,8 +271,8 @@ func keyFromArg(arg interface{}) (string, error) {
 // ClientForKey returns the Client which *ought* to handle the given key, based
 // on Cluster's understanding of the cluster topology at the given moment (no
 // extra commands are issued to any redis instances to support this call). This
-// will only return an error if Cluster found an error connecting to a node
-// which it hadn't previously connected to. If no node is set to handle the
+// will only return an error if Cluster encountered an error connecting to a
+// node which it hadn't previously connected to. If no node is set to handle the
 // key's slot than the fallback client is returned
 func (c *Cluster) ClientForKey(key string) (*redis.Client, error) {
 	if start := strings.Index(key, "{"); start >= 0 {
