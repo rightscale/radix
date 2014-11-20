@@ -28,35 +28,48 @@ func errorReply(err error) *redis.Reply {
 	return &redis.Reply{Type: redis.ErrorReply, Err: err}
 }
 
-var BadCmdNoKey = &redis.CmdError{errors.New("bad command, no key")}
-
-type pipePart struct {
-	cmd  string
-	args []interface{}
+func errorReplyf(format string, args ...interface{}) *redis.Reply {
+	return errorReply(fmt.Errorf(format, args...))
 }
 
-type pipeInfo struct {
-	key    string
-	client *redis.Client
-	parts  []pipePart
+var BadCmdNoKey = &redis.CmdError{errors.New("bad command, no key")}
+
+type clientCmdOpts struct {
+	clientAddr                  string
+	client                      *redis.Client
+	cmd                         string
+	args                        []interface{}
+	isAsk                       bool
+	havePickedRandom, haveReset bool
+	tried                       map[string]struct{}
+}
+
+func (o *clientCmdOpts) justTried(addr string) {
+	if o.tried == nil {
+		o.tried = map[string]struct{}{}
+	}
+	o.tried[addr] = struct{}{}
+}
+
+func (o *clientCmdOpts) haveTried(addr string) bool {
+	if o.tried == nil {
+		return false
+	}
+	_, ok := o.tried[addr]
+	return ok
 }
 
 // Cluster wraps a Client and accounts for all redis cluster logic
 type Cluster struct {
-	pipeInfo
 	mapping
 	clients map[string]*redis.Client
 	timeout time.Duration
 
-	// FallbackAddr is the address which will be connected to make the
-	// FallbackClient. It can be changed post-initialization, Reset must be
-	// called for the change to take effect though
-	FallbackAddr string
-
-	// FallbackClient is the client which is used when retrieving the cluster
-	// topology during initialization or Reset, or when it is unknown which node
-	// is handling a particular slot
-	FallbackClient *redis.Client
+	// This is only stored here for efficiency, so we don't have to go
+	// allocating a new one for every command. It is only EVER modified inside
+	// Cmd and clientCmd, nothing else should ever ever touch this field. If
+	// they do they are bad and should feel bad
+	clientCmdOpts
 
 	// Number of slot misses. This is incremented everytime a command's reply is
 	// a MOVED or ASK message
@@ -84,12 +97,18 @@ func NewCluster(addr string) (*Cluster, error) {
 // Same as NewCluster, but will use timeout as the read/write timeout when
 // communicating with cluster nodes
 func NewClusterTimeout(addr string, timeout time.Duration) (*Cluster, error) {
+
+	initialClient, err := redis.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return nil, err
+	}
+
 	c := Cluster{
 		mapping: mapping{},
-		clients: map[string]*redis.Client{},
+		clients: map[string]*redis.Client{
+			addr: initialClient,
+		},
 		timeout: timeout,
-
-		FallbackAddr: addr,
 	}
 	if err := c.Reset(); err != nil {
 		return nil, err
@@ -97,26 +116,58 @@ func NewClusterTimeout(addr string, timeout time.Duration) (*Cluster, error) {
 	return &c, nil
 }
 
-// Reset will re-retrieve the cluster topology and set up/teardown connections
-// as necessary. It begins by always closing the FallbackClient and
-// re-connecting it, then using that to call CLUSTER SLOTS. The return from that
-// is used to re-create the topology, create any missing clients, and close any
-// clients which are no longer needed.
-func (c *Cluster) Reset() error {
-	var err error
-	if c.FallbackClient != nil {
-		c.FallbackClient.Close()
+// getClient returns a client for the given address, either previously made or
+// newly created. This method can PING an existing client before returning it,
+// closing and reconnecting if that fails.
+func (c *Cluster) getClient(addr string, ping bool) (*redis.Client, error) {
+	// If we find a client and can ping it, we return that
+	if client, ok := c.clients[addr]; ok {
+		if !ping || client.Cmd("PING").Err == nil {
+			return client, nil
+		} else {
+			delete(c.clients, addr)
+			client.Close()
+			// And continue to making a new client
+		}
 	}
-	c.FallbackClient, err = redis.DialTimeout("tcp", c.FallbackAddr, c.timeout)
+
+	// At this point we just need to try to make a whole new client
+	client, err := redis.DialTimeout("tcp", addr, c.timeout)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	c.clients[addr] = client
+	return client, nil
+}
+
+// getAnyClient retrieves a random known client address and a client connected
+// to it. If ping is set it will iterate and return a known client which has
+// responded to a PING. Returns nil if none are found
+func (c *Cluster) getAnyClient(ping bool) (string, *redis.Client) {
+	for addr := range c.clients {
+		if client, err := c.getClient(addr, ping); err == nil {
+			return addr, client
+		}
+	}
+	return "", nil
+}
+
+// Reset will re-retrieve the cluster topology and set up/teardown connections
+// as necessary. It begins by calling CLUSTER SLOTS on a random known
+// connection. The return from that is used to re-create the topology, create
+// any missing clients, and close any clients which are no longer needed.
+func (c *Cluster) Reset() error {
+
+	addr, client := c.getAnyClient(true)
+	if client == nil {
+		return fmt.Errorf("no available nodes to call CLUSTER SLOTS on")
 	}
 
 	clients := map[string]*redis.Client{
-		c.FallbackAddr: c.FallbackClient,
+		addr: client,
 	}
 
-	r := c.FallbackClient.Cmd("CLUSTER", "SLOTS")
+	r := client.Cmd("CLUSTER", "SLOTS")
 	if r.Err != nil {
 		return r.Err
 	} else if r.Elems == nil || len(r.Elems) < 1 {
@@ -125,8 +176,9 @@ func (c *Cluster) Reset() error {
 
 	var start, end, port int
 	var ip, slotAddr string
-	var client *redis.Client
+	var slotClient *redis.Client
 	var ok bool
+	var err error
 	for _, slotGroup := range r.Elems {
 		if start, err = slotGroup.Elems[0].Int(); err != nil {
 			return err
@@ -145,21 +197,21 @@ func (c *Cluster) Reset() error {
 		// connected to. I guess the node doesn't know its own ip? I guess that
 		// makes sense
 		if ip == "" {
-			slotAddr = c.FallbackAddr
+			slotAddr = addr
 		} else {
 			slotAddr = ip + ":" + strconv.Itoa(port)
 		}
 		for i := start; i <= end; i++ {
 			c.mapping[i] = slotAddr
 		}
-		if client, ok = c.clients[slotAddr]; ok {
-			clients[slotAddr] = client
+		if slotClient, ok = c.clients[slotAddr]; ok {
+			clients[slotAddr] = slotClient
 		} else {
-			client, err = redis.DialTimeout("tcp", slotAddr, c.timeout)
+			slotClient, err = redis.DialTimeout("tcp", slotAddr, c.timeout)
 			if err != nil {
 				return err
 			}
-			clients[slotAddr] = client
+			clients[slotAddr] = slotClient
 		}
 	}
 
@@ -188,43 +240,149 @@ func (c *Cluster) Cmd(cmd string, args ...interface{}) *redis.Reply {
 		return errorReply(err)
 	}
 
-	client, err := c.ClientForKey(key)
+	client, addr, err := c.ClientForKey(key)
 	if err != nil {
 		return errorReply(err)
 	}
-	return c.clientCmd(client, cmd, args...)
+
+	c.clientCmdOpts = clientCmdOpts{
+		clientAddr: addr,
+		client:     client,
+		cmd:        cmd,
+		args:       args,
+	}
+
+	return c.clientCmd(&c.clientCmdOpts)
 }
 
-// clientCmd is separated out from Cmd mainly to aid in testing
-func (c *Cluster) clientCmd(
-	client *redis.Client, cmd string, args ...interface{},
-) *redis.Reply {
-	r := client.Cmd(cmd, args...)
-	if err := r.Err; err != nil {
-		msg := err.Error()
-		if strings.HasPrefix(msg, "MOVED") {
-			c.Misses++
-			slot, addr := redirectInfo(msg)
-			c.mapping[slot] = addr
+// Logic for doing a command:
+// * Get client for command's slot, try it
+// * If err == nil, return reply
+// * If err is a client error:
+// 		* If MOVED:
+//			* If node not tried before, go to top with that node
+//			* Otherwise if we haven't Reset, do that and go to top with random
+//			  node
+//			* Otherwise error out
+//		* If ASK (same as MOVED, but call ASKING beforehand and don't modify
+//		  slots)
+// 		* Otherwise return the error
+// * Otherwise it is a network error
+//		* If we haven't reconnected to this node yet, do that and go to top
+//		* If we haven't picked a random node yet, do that and go to top
+//		* Otherwise return network error (we don't reset, we have no nodes to
+//		  do it with)
 
-			newClient, err := c.clientForAddr(addr)
-			if err != nil {
-				return errorReply(err)
-			}
-			return c.clientCmd(newClient, cmd, args...)
-		} else if strings.HasPrefix(msg, "ASK") {
-			c.Misses++
-			_, addr := redirectInfo(msg)
-			newClient, err := c.clientForAddr(addr)
-			if err != nil {
-				return errorReply(err)
-			}
-			if r := newClient.Cmd("ASKING"); r.Err != nil {
-				return r
-			}
-			return newClient.Cmd(cmd, args...)
-		}
+func (c *Cluster) clientCmd(o *clientCmdOpts) *redis.Reply {
+	var r *redis.Reply
+
+	if o.isAsk {
+		r = o.client.Cmd("ASKING")
+		o.isAsk = false
 	}
+
+	// If we asked and got an error, we continue on with error handling as we
+	// would normally do. If we didn't ask or the ask succeeded we do the
+	// command normally, and see how that goes
+	if r == nil || r.Err == nil {
+		r = o.client.Cmd(o.cmd, o.args...)
+	}
+
+	err := r.Err
+	if err == nil {
+		return r
+	}
+
+	// At this point we have some kind of error we have to deal with. The above
+	// code is what will be run 99% of the time and is pretty streamlined,
+	// everything after this point is allowed to be hairy and gross
+
+	haveTriedBefore := o.haveTried(o.clientAddr)
+	o.justTried(o.clientAddr)
+
+	// If we're not dealing with a CmdError (application error) then it's a
+	// network error, deal with that here
+	if _, ok := err.(*redis.CmdError); !ok {
+		if !haveTriedBefore {
+			o.client.Close()
+			o.client, err = redis.DialTimeout("tcp", o.clientAddr, c.timeout)
+			if err == nil {
+				c.clients[o.clientAddr] = o.client
+				return c.clientCmd(o)
+			}
+		}
+		if !o.havePickedRandom {
+			o.havePickedRandom = true
+			o.clientAddr, o.client = c.getAnyClient(false)
+			if o.client != nil {
+				return c.clientCmd(o)
+			}
+		}
+		if !o.haveReset {
+			o.haveReset = true
+			if err = c.Reset(); err != nil {
+				return errorReplyf("Could not get cluster info (0): %s", err)
+			}
+			o.clientAddr, o.client = c.getAnyClient(true)
+			if o.client != nil {
+				return c.clientCmd(o)
+			}
+		}
+
+		return errorReplyf("Giving up trying nodes, last error is: %s", err)
+	}
+
+	// Here we deal with application errors that are either MOVED or ASK
+	msg := err.Error()
+	moved := strings.HasPrefix(msg, "MOVED ")
+	ask := strings.HasPrefix(msg, "ASK ")
+	if moved || ask {
+		c.Misses++
+		slot, addr := redirectInfo(msg)
+
+		// if we already tried the node we've been told to try, Reset and
+		// try again with a random node. If that still doesn't work, or we
+		// already did that once, bail hard
+		if o.haveTried(addr) {
+			if o.haveReset {
+				return errorReplyf("Cluster doesn't make sense")
+			}
+			if err := c.Reset(); err != nil {
+				return errorReplyf("Could not get cluster info (1): %s", err)
+			}
+			newAddr, newClient := c.getAnyClient(false)
+			if newClient == nil {
+				return errorReplyf("No available cluster nodes")
+			}
+
+			// we go back to scratch here, pretend we haven't tried any
+			// since we just picked a random node, it's likely we'll get a
+			// redirect. We won't reset again so this doesn't hurt too much
+			o.tried = nil
+			o.havePickedRandom = true
+			o.haveReset = true
+			o.clientAddr = newAddr
+			o.client = newClient
+			return c.clientCmd(o)
+		}
+
+		if moved {
+			c.mapping[slot] = addr
+		}
+		if ask {
+			o.isAsk = true
+		}
+		newClient, err := c.getClient(addr, false)
+		if err != nil {
+			return errorReply(err)
+		}
+		o.clientAddr = addr
+		o.client = newClient
+		return c.clientCmd(o)
+	}
+
+	// It's a normal application error (like WRONG KEY TYPE or whatever), return
+	// that to the client
 	return r
 }
 
@@ -268,13 +426,11 @@ func keyFromArg(arg interface{}) (string, error) {
 	}
 }
 
-// ClientForKey returns the Client which *ought* to handle the given key, based
-// on Cluster's understanding of the cluster topology at the given moment (no
-// extra commands are issued to any redis instances to support this call). This
-// will only return an error if Cluster encountered an error connecting to a
-// node which it hadn't previously connected to. If no node is set to handle the
-// key's slot than the fallback client is returned
-func (c *Cluster) ClientForKey(key string) (*redis.Client, error) {
+// ClientForKey returns the Client which *ought* to handle the given key (along
+// with the node address for that client), based on Cluster's understanding of
+// the cluster topology at the given moment. If the slot isn't known a random
+// client is returned
+func (c *Cluster) ClientForKey(key string) (*redis.Client, string, error) {
 	if start := strings.Index(key, "{"); start >= 0 {
 		if end := strings.Index(key[start+2:], "}"); end >= 0 {
 			key = key[start+1 : start+2+end]
@@ -283,88 +439,18 @@ func (c *Cluster) ClientForKey(key string) (*redis.Client, error) {
 	i := CRC16([]byte(key)) % NUM_SLOTS
 	addr := c.mapping[i]
 	if addr == "" {
-		return c.FallbackClient, nil
+		addr, client := c.getAnyClient(false)
+		if client == nil {
+			return nil, "", fmt.Errorf("No availble nodes")
+		}
+		return client, addr, nil
 	}
-	return c.clientForAddr(addr)
-}
-
-func (c *Cluster) clientForAddr(addr string) (*redis.Client, error) {
-	client := c.clients[addr]
-	if client != nil {
-		return client, nil
-	}
-
-	client, err := redis.DialTimeout("tcp", addr, c.timeout)
-	if err != nil {
-		return nil, err
-	}
-	c.clients[addr] = client
-	return client, nil
-}
-
-// PipeAppend adds a command to the buffer of commands which will be sent at the
-// same time to a single client. See GetPipeReplies for the full behavior
-func (c *Cluster) PipeAppend(cmd string, args ...interface{}) {
-	if c.pipeInfo.parts == nil {
-		c.pipeInfo.parts = make([]pipePart, 0, 4)
-	}
-	c.pipeInfo.parts = append(c.pipeInfo.parts, pipePart{cmd, args})
-
-	if len(args) > 0 && c.pipeInfo.key == "" {
-		c.pipeInfo.key, _ = keyFromArg(args[0])
-	}
-}
-
-func pipeRetErr(ret []*redis.Reply, err error) []*redis.Reply {
-	for i := range ret {
-		ret[i] = errorReply(err)
-	}
-	return ret
-}
-
-// GetPipeReplies sends all the commands in the current pipe buffer (created
-// through PipeAppend) to a single client at the same time and returns all of
-// their responses. The client is chosen by finding the first command in the
-// bufffer which specifies a key, and using that key's client as the destination
-// client for all the commands. GetPipeReplies will NOT do transparent
-// redirection like the normal Cmd will. The primary use-case of pipelining is
-// for MULTI/EXEC transactions.
-func (c *Cluster) GetPipeReplies() []*redis.Reply {
-	p := c.pipeInfo
-	c.pipeInfo = pipeInfo{}
-
-	if p.parts == nil || len(p.parts) == 0 {
-		return []*redis.Reply{}
-	}
-
-	ret := make([]*redis.Reply, len(p.parts))
-
-	if p.key == "" {
-		return pipeRetErr(ret, BadCmdNoKey)
-	}
-
-	client, err := c.ClientForKey(p.key)
-	if err != nil {
-		return pipeRetErr(ret, err)
-	}
-
-	for i := range p.parts {
-		p := &p.parts[i]
-		client.Append(p.cmd, p.args...)
-	}
-
-	for i := range ret {
-		ret[i] = client.GetReply()
-	}
-
-	return ret
+	client, err := c.getClient(addr, false)
+	return client, addr, err
 }
 
 // Close calls Close on the FallbackClient and all other connected clients
 func (c *Cluster) Close() {
-	if c.FallbackClient != nil {
-		c.FallbackClient.Close()
-	}
 	for i := range c.clients {
 		c.clients[i].Close()
 	}

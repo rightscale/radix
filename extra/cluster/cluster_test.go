@@ -47,7 +47,6 @@ func TestReset(t *T) {
 	// Simply initializing a cluster proves Reset works to some degree, since
 	// NewCluster calls Reset
 	cluster := getCluster(t)
-	oldFallback := cluster.FallbackClient
 	old7000 := cluster.clients["127.0.0.1:7000"]
 	old7001 := cluster.clients["127.0.0.1:7001"]
 
@@ -57,20 +56,12 @@ func TestReset(t *T) {
 	assert.Nil(t, err)
 	cluster.clients["127.0.0.1:6379"] = client
 
-	// We also change the FallbackAddr to prove that that doesn't break things
-	cluster.FallbackAddr = "127.0.0.1:7001"
-
 	err = cluster.Reset()
 	assert.Nil(t, err)
 
-	// Prove that the bogus client and old fallback client are closed, and that
-	// the new fallback client is open
+	// Prove that the bogus client is closed
 	closedErr := errors.New("use of closed network connection")
 	assert.Equal(t, closedErr, client.Cmd("PING").Err)
-	assert.Equal(t, closedErr, oldFallback.Cmd("PING").Err)
-	s, err := cluster.FallbackClient.Cmd("PING").Str()
-	assert.Nil(t, err)
-	assert.Equal(t, "PONG", s)
 
 	// Prove that the remaining two addresses are still in clients, were not
 	// reconnected, and still work
@@ -107,10 +98,16 @@ func TestCmdMiss(t *T) {
 
 	assert.Nil(t, cluster.Cmd("SET", "foo", "baz").Err)
 
-	barClient, err := cluster.ClientForKey("bar")
+	barClient, barAddr, err := cluster.ClientForKey("bar")
 	assert.Nil(t, err)
 
-	s, err := cluster.clientCmd(barClient, "GET", "foo").Str()
+	o := clientCmdOpts{
+		clientAddr: barAddr,
+		client:     barClient,
+		cmd:        "GET",
+		args:       []interface{}{"foo"},
+	}
+	s, err := cluster.clientCmd(&o).Str()
 	assert.Nil(t, err)
 	assert.Equal(t, "baz", s)
 
@@ -130,9 +127,9 @@ func TestCmdAsk(t *T) {
 	assert.Equal(t, 0, cluster.Misses)
 
 	// the key "wat" originally belongs on 7000
-	src, err := cluster.clientForAddr("127.0.0.1:7000")
+	src, err := cluster.getClient("127.0.0.1:7000", false)
 	assert.Nil(t, err)
-	dst, err := cluster.clientForAddr("127.0.0.1:7001")
+	dst, err := cluster.getClient("127.0.0.1:7001", false)
 	assert.Nil(t, err)
 
 	// We need the node ids. Unfortunately, this is the best way to get them
@@ -165,66 +162,4 @@ func TestCmdAsk(t *T) {
 	// Bail on the migration TODO this doesn't totally bail for some reason
 	assert.Nil(t, dst.Cmd("CLUSTER", "SETSLOT", slot, "NODE", srcId).Err)
 	assert.Nil(t, src.Cmd("CLUSTER", "SETSLOT", slot, "NODE", srcId).Err)
-}
-
-func TestPipe(t *T) {
-	cluster := getCluster(t)
-
-	// We do this multiple times to prove that pipe state gets properly cleaned
-	// up after every GetPipeReplies
-	for i := 0; i < 5; i++ {
-		cluster.PipeAppend("MULTI")
-		cluster.PipeAppend("SET", "{foo}abc", "foo")
-		cluster.PipeAppend("SET", "{foo}def", "foo")
-		cluster.PipeAppend("SET", "{foo}ghi", "foo")
-		cluster.PipeAppend("GET", "{foo}abc")
-		cluster.PipeAppend("EXEC")
-
-		r := cluster.GetPipeReplies()
-		assert.Equal(t, 6, len(r))
-
-		s, err := r[0].Str()
-		assert.Nil(t, err)
-		assert.Equal(t, "OK", s)
-
-		for i := 1; i < 5; i++ {
-			s, err := r[i].Str()
-			assert.Nil(t, err, "i: %d", i)
-			assert.Equal(t, "QUEUED", s, "i: %d", i)
-		}
-
-		assert.Equal(t, 4, len(r[5].Elems))
-		r = r[5].Elems
-
-		for i := 0; i < 3; i++ {
-			s, err := r[i].Str()
-			assert.Nil(t, err, "i: %d", i)
-			assert.Equal(t, "OK", s, "i: %d", i)
-		}
-
-		s, err = r[3].Str()
-		assert.Nil(t, err)
-		assert.Equal(t, "foo", s)
-	}
-}
-
-func TestErrPipe(t *T) {
-	// We're going to mess with the cluster a bit, specifically for the key
-	// "woot" which lies in slot 261 and ought to exist on the port 7000 node
-	cluster := getCluster(t)
-	cluster.mapping[261] = "127.0.0.1:7001"
-
-	cluster.PipeAppend("MULTI")
-	cluster.PipeAppend("SET", "woot", "woot!")
-	cluster.PipeAppend("EXEC")
-
-	r := cluster.GetPipeReplies()
-	assert.Equal(t, 3, len(r))
-
-	s, err := r[0].Str()
-	assert.Nil(t, err)
-	assert.Equal(t, "OK", s)
-
-	assert.NotNil(t, r[1].Err)
-	assert.NotNil(t, r[2].Err)
 }
