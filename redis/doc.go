@@ -30,7 +30,7 @@
 //	}
 //
 //	// Checking Err field directly
-//	
+//
 //	err = client.Cmd("PING").Err
 //	if err != nil {
 //		// handle err
@@ -42,12 +42,12 @@
 // ListBytes, or you can use the Elems field for more low-level access:
 //
 //	r := client.Cmd("MGET", "foo", "bar", "baz")
-//	
+//
 //	// This:
 //	for _, elemStr := range r.List() {
 //		fmt.Println(elemStr)
 //	}
-//	
+//
 //	// is equivalent to this:
 //	for i := range r.Elems {
 //		elemStr, _ := r.Elems[i].Str()
@@ -67,18 +67,18 @@
 //	client.Append("GET", "foo")
 //	client.Append("SET", "bar", "foo")
 //	client.Append("DEL", "baz")
-//	
+//
 //	// Read GET foo reply
 //	foo, err := client.GetReply().Str()
 //	if err != nil {
 //		// handle err
 //	}
-//	
+//
 //	// Read SET bar foo reply
 //	if err := client.GetReply().Err; err != nil {
 //		// handle err
 //	}
-//	
+//
 //	// Read DEL baz reply
 //	if err := client.GetReply().Err; err != nil {
 //		// handle err
