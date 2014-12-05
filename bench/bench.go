@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/fzzy/radix/redis"
+	"github.com/rightscale/radix/redis"
 	"os"
 	"runtime/pprof"
 	"time"

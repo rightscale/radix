@@ -6,8 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/fzzy/radix/extra/pool"
-	"github.com/fzzy/radix/redis"
+	"github.com/rightscale/radix/extra/pool"
+	"github.com/rightscale/radix/redis"
 )
 
 // These tests assume there is a cluster running on ports 7000 and 7001, with
