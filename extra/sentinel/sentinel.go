@@ -212,7 +212,11 @@ func (c *Client) spin() {
 			req.retCh <- &getReqRet{conn, nil}
 
 		case req := <-c.putCh:
-			if pool, ok := c.masterPools[req.name]; ok {
+			// When alwaysErr is set, the client can’t be used anymore. Hence when
+			// checking in connections, we should close them.
+			if c.alwaysErr != nil {
+				req.conn.Close()
+			} else if pool, ok := c.masterPools[req.name]; ok {
 				pool.Put(req.conn)
 			}
 
