@@ -220,6 +220,9 @@ func (c *Client) GetMaster(name string) (*redis.Client, error) {
 // do not return a connection which is having connectivity issues, or which is
 // otherwise unable to perform requests.
 func (c *Client) PutMaster(name string, client *redis.Client) {
+	if c.alwaysErr != nil {
+		client.Close()
+	}
 	c.putCh <- &putReq{name, client}
 }
 
