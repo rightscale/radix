@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net"
 
-	"github.com/fzzy/radix/redis"
+	"github.com/rightscale/radix/redis"
 )
 
 type SubReplyType uint8
