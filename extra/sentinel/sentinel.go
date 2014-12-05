@@ -180,6 +180,9 @@ func (c *Client) spin() {
 
 		case err := <-c.alwaysErrCh:
 			c.alwaysErr = err
+			for _, p := range c.masterPools {
+				p.Empty()
+			}
 
 		case sm := <-c.switchMasterCh:
 			if p, ok := c.masterPools[sm.name]; ok {
