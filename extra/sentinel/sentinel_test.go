@@ -24,6 +24,23 @@ func TestSentinelConnectionError(t *testing.T) {
 	verifyConnectionClosed(t, redisClient)
 }
 
+func TestPutMaster(t *testing.T) {
+	redisMaster := "mymaster"
+
+	sentinelClient := newSentinelClient(t, redisMaster)
+	defer sentinelClient.Close()
+
+	redisClient := getRedisClient(t, sentinelClient, redisMaster)
+
+	// Simulating a Sentinel connection failure
+	sentinelClient.subClient.Client.Close()
+
+	// Returning the redisClient to a disconnected Sentinel Client
+	// should close the redisClient's connection
+	sentinelClient.PutMaster(redisMaster, redisClient)
+	verifyConnectionClosed(t, redisClient)
+}
+
 func newSentinelClient(t *testing.T, redisMaster string) *Client {
 	sentinelClient, err := NewClient("tcp", "localhost:26379", 1, redisMaster)
 	if err != nil {
