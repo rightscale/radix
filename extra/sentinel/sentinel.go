@@ -59,6 +59,7 @@ import (
 
 	"github.com/rightscale/radix/extra/pool"
 	"github.com/rightscale/radix/extra/pubsub"
+	"github.com/rightscale/radix/logging"
 )
 
 // An error wrapper returned by operations in this package. It implements the
@@ -98,6 +99,7 @@ type switchMaster struct {
 }
 
 type Client struct {
+	logger      *logging.LoggerWithPrefix
 	poolSize    int
 	masterPools map[string]*pool.Pool
 	subClient   *pubsub.SubClient
@@ -121,6 +123,16 @@ func NewClient(
 ) (
 	*Client, error,
 ) {
+	return NewClientWithLogger(logging.NewNilLogger(), network, address, poolSize, names...)
+}
+
+func NewClientWithLogger(
+	logger logging.SimpleLogger, network, address string, poolSize int, names ...string,
+) (
+	*Client, error,
+) {
+	prefixedLogger := logging.NewLoggerWithPrefix("[SC]", logger)
+	initLogger := prefixedLogger.WithAnotherPrefix("[init]")
 
 	// We use this to fetch initial details about masters before we upgrade it
 	// to a pubsub client
@@ -159,6 +171,7 @@ func NewClient(
 		closeCh:        make(chan struct{}),
 		alwaysErrCh:    make(chan *ClientError),
 		switchMasterCh: make(chan *switchMaster),
+		logger:         prefixedLogger,
 	}
 
 	go c.subSpin()
