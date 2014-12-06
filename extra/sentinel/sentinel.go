@@ -17,6 +17,7 @@ package sentinel
 import (
 	"errors"
 	"github.com/rightscale/radix/redis"
+	"log"
 	"strings"
 
 	"github.com/rightscale/radix/extra/pool"
@@ -183,6 +184,8 @@ func (c *Client) spin() {
 
 		case sm := <-c.switchMasterCh:
 			if p, ok := c.masterPools[sm.name]; ok {
+				log.Printf("[SentinelClient] Connecting to new '%s' master with addr: '%s'\n", sm.name, sm.addr)
+
 				p.Empty()
 				p = pool.NewOrEmptyPool("tcp", sm.addr, c.poolSize)
 				c.masterPools[sm.name] = p
