@@ -16,11 +16,12 @@ package sentinel
 
 import (
 	"errors"
-	"github.com/fzzy/radix/redis"
+	"github.com/rightscale/radix/redis"
+	"log"
 	"strings"
 
-	"github.com/fzzy/radix/extra/pool"
-	"github.com/fzzy/radix/extra/pubsub"
+	"github.com/rightscale/radix/extra/pool"
+	"github.com/rightscale/radix/extra/pubsub"
 )
 
 // An error wrapper returned by operations in this package. It implements the
@@ -183,6 +184,8 @@ func (c *Client) spin() {
 
 		case sm := <-c.switchMasterCh:
 			if p, ok := c.masterPools[sm.name]; ok {
+				log.Printf("Connecting to new '%s' master with addr: '%s'", sm.name, sm.addr)
+
 				p.Empty()
 				p = pool.NewOrEmptyPool("tcp", sm.addr, c.poolSize)
 				c.masterPools[sm.name] = p

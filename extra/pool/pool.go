@@ -1,7 +1,7 @@
 package pool
 
 import (
-	"github.com/fzzy/radix/redis"
+	"github.com/rightscale/radix/redis"
 )
 
 // A simple connection pool. It will create a small pool of initial connections,
