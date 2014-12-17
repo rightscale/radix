@@ -87,6 +87,7 @@ func NewClient(
 
 	// We use this to fetch initial details about masters before we upgrade it
 	// to a pubsub client
+	log.Printf("[SentinelClient][init] Connecting to Sentinel with addr: '%s'\n", address)
 	client, err := redis.Dial(network, address)
 	if err != nil {
 		return nil, &ClientError{err: err}
@@ -94,6 +95,7 @@ func NewClient(
 
 	masterPools := map[string]*pool.Pool{}
 	for _, name := range names {
+		log.Printf("[SentinelClient][init] Initializing connection pool for redis master '%s'\n", name)
 		r := client.Cmd("SENTINEL", "MASTER", name)
 		l, err := r.List()
 		if err != nil {
@@ -107,6 +109,7 @@ func NewClient(
 		masterPools[name] = pool
 	}
 
+	log.Printf("[SentinelClient][init] Subscribing to +switch-master events\n")
 	subClient := pubsub.NewSubClient(client)
 	r := subClient.Subscribe("+switch-master")
 	if r.Err != nil {
@@ -126,6 +129,8 @@ func NewClient(
 
 	go c.subSpin()
 	go c.spin()
+
+	log.Printf("[SentinelClient][init] Initialization completed\n")
 	return c, nil
 }
 
@@ -180,6 +185,8 @@ func (c *Client) spin() {
 			}
 
 		case err := <-c.alwaysErrCh:
+			log.Printf("[SentinelClient] Unrecoverable error encountered: '%s'\n", err.Error())
+
 			c.alwaysErr = err
 			for _, p := range c.masterPools {
 				p.Empty()
@@ -195,6 +202,8 @@ func (c *Client) spin() {
 			}
 
 		case <-c.closeCh:
+			log.Printf("[SentinelClient] Closing...")
+
 			for name := range c.masterPools {
 				c.masterPools[name].Empty()
 			}
