@@ -29,6 +29,7 @@ type SubClient struct {
 type SubReply struct {
 	Type     SubReplyType // SubReply type
 	Channel  string       // Channel reply is on (MessageReply)
+	Pattern  string       // The pattern that was matched by this reply, if PSubscribe was used
 	SubCount int          // Count of subs active after this action (SubscribeReply or UnsubscribeReply)
 	Message  string       // Publish message (MessageReply)
 	Err      error        // SubReply error (ErrorReply)
@@ -155,6 +156,13 @@ func (c *SubClient) parseReply(reply *redis.Reply) *SubReply {
 			chanI, msgI = 1, 2
 		} else { // "pmessage"
 			chanI, msgI = 2, 3
+			pattern, err := reply.Elems[1].Str()
+			if err != nil {
+				sr.Err = errors.New("subscription multireply does not have string value for pattern")
+				sr.Type = ErrorReply
+				return sr
+			}
+			sr.Pattern = pattern
 		}
 
 		sr.Type = MessageReply
