@@ -42,7 +42,7 @@ type request struct {
 // used as the read/write timeout when communicating with redis
 func DialTimeout(network, addr string, timeout time.Duration) (*Client, error) {
 	// establish a connection
-	conn, err := net.Dial(network, addr)
+	conn, err := net.DialTimeout(network, addr, timeout)
 	if err != nil {
 		return nil, err
 	}
