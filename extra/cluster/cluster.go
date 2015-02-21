@@ -394,7 +394,6 @@ func (c *Cluster) clientCmd(
 ) *redis.Reply {
 	var err error
 	var r *redis.Reply
-	defer c.putConn(addr, client, &err)
 
 	if ask {
 		r = client.Cmd("ASKING")
@@ -409,6 +408,7 @@ func (c *Cluster) clientCmd(
 	}
 
 	if err = r.Err; err == nil {
+		c.putConn(addr, client, nil)
 		return r
 	}
 
@@ -443,6 +443,10 @@ func (c *Cluster) clientCmd(
 		return r
 	}
 
+	// At this point we know the client didn't have a network error, and also
+	// that we're not going to use it again, so we return it back to the pool
+	c.putConn(addr, client, nil)
+
 	// Here we deal with application errors that are either MOVED or ASK
 	msg := err.Error()
 	moved := strings.HasPrefix(msg, "MOVED ")
@@ -458,7 +462,7 @@ func (c *Cluster) clientCmd(
 		// already did that once, bail hard
 		if haveTried(tried, addr) {
 			if haveReset {
-				return errorReplyf("Cluster doesn't make sense")
+				return errorReplyf("Cluster doesn't make sense, %s might be gone", addr)
 			}
 			if resetErr := c.Reset(); resetErr != nil {
 				return errorReplyf("Could not get cluster info: %s", resetErr)
@@ -482,10 +486,17 @@ func (c *Cluster) clientCmd(
 			}
 		}
 
+		// At this point addr is whatever redis told us it should be. However,
+		// if we can't get a connection to it we'll never actually mark it as
+		// tried, resulting in an infinite loop. Here we mark it as tried
+		// regardless of if it actually was or not
+		tried = justTried(tried, addr)
+
 		addr, client, getErr := c.getConn("", addr)
 		if getErr != nil {
 			return errorReply(getErr)
 		}
+
 		return c.clientCmd(addr, client, cmd, args, ask, tried, haveReset)
 	}
 
