@@ -55,6 +55,7 @@ type Cluster struct {
 	o Opts
 	mapping
 	pools         map[string]*pool.Pool
+	poolThrottles map[string]<-chan time.Time
 	resetThrottle *time.Ticker
 	callCh        chan func(*Cluster)
 	stopCh        chan struct{}
@@ -79,8 +80,13 @@ type Opts struct {
 	// The size of the connection pool to use for each host. Default is 10
 	PoolSize int
 
+	// The time which must elapse between subsequent calls to create a new
+	// connection pool (on a per redis instance basis) in certain circumstances.
+	// The default is 500 milliseconds
+	PoolThrottle time.Duration
+
 	// The time which must elapse between subsequent calls to Reset(). The
-	// default is 10 seconds
+	// default is 500 milliseconds
 	ResetThrottle time.Duration
 }
 
@@ -116,24 +122,28 @@ func NewClusterWithOpts(o Opts) (*Cluster, error) {
 	if o.PoolSize == 0 {
 		o.PoolSize = 10
 	}
-	if o.ResetThrottle == 0 {
-		o.ResetThrottle = 10 * time.Second
+	if o.PoolThrottle == 0 {
+		o.PoolThrottle = 500 * time.Millisecond
 	}
-
-	initialPool, err := newPool(o.Addr, o.Timeout, o.PoolSize)
-	if err != nil {
-		return nil, err
+	if o.ResetThrottle == 0 {
+		o.ResetThrottle = 500 * time.Millisecond
 	}
 
 	c := Cluster{
-		o:       o,
-		mapping: mapping{},
-		pools: map[string]*pool.Pool{
-			o.Addr: initialPool,
-		},
-		callCh: make(chan func(*Cluster)),
-		stopCh: make(chan struct{}),
+		o:             o,
+		mapping:       mapping{},
+		pools:         map[string]*pool.Pool{},
+		poolThrottles: map[string]<-chan time.Time{},
+		callCh:        make(chan func(*Cluster)),
+		stopCh:        make(chan struct{}),
 	}
+
+	initialPool, err := c.newPool(o.Addr, true)
+	if err != nil {
+		return nil, err
+	}
+	c.pools[o.Addr] = initialPool
+
 	go c.spin()
 	if err := c.Reset(); err != nil {
 		return nil, err
@@ -141,15 +151,27 @@ func NewClusterWithOpts(o Opts) (*Cluster, error) {
 	return &c, nil
 }
 
-func newPool(
-	addr string, timeout time.Duration, poolSize int,
-) (
-	*pool.Pool, error,
-) {
-	df := func(network, addr string) (*redis.Client, error) {
-		return redis.DialTimeout(network, addr, timeout)
+func (c *Cluster) newPool(addr string, clearThrottle bool) (*pool.Pool, error) {
+	if clearThrottle {
+		delete(c.poolThrottles, addr)
+	} else if throttle, ok := c.poolThrottles[addr]; ok {
+		select {
+		case <-throttle:
+			delete(c.poolThrottles, addr)
+		default:
+			return nil, fmt.Errorf("newPool(%s) throttled", addr)
+		}
 	}
-	return pool.NewCustomPool("tcp", addr, poolSize, df)
+
+	df := func(network, addr string) (*redis.Client, error) {
+		return redis.DialTimeout(network, addr, c.o.Timeout)
+	}
+	p, err := pool.NewCustomPool("tcp", addr, c.o.PoolSize, df)
+	if err != nil {
+		c.poolThrottles[addr] = time.After(c.o.PoolThrottle)
+		return nil, err
+	}
+	return p, err
 }
 
 // Anything which requires creating/deleting pools must be done in here
@@ -166,7 +188,7 @@ func (c *Cluster) spin() {
 
 // Returns a connection for the given key or given address, depending on which
 // is set. Even if addr is given the returned addr may be different, if that
-// addr didn't have an associated pool
+// addr didn't have an associated pool and one couldn't be created
 func (c *Cluster) getConn(key, addr string) (string, *redis.Client, error) {
 	respCh := make(chan *connTup)
 	c.callCh <- func(c *Cluster) {
@@ -174,9 +196,20 @@ func (c *Cluster) getConn(key, addr string) (string, *redis.Client, error) {
 			addr = c.addrForKeyInner(key)
 		}
 
-		pool, ok := c.pools[addr]
-		if !ok {
+		var pool *pool.Pool
+		if addr == "" {
 			addr, pool = c.getRandomPoolInner()
+		} else {
+			var ok bool
+			var err error
+			if pool, ok = c.pools[addr]; !ok {
+				pool, err = c.newPool(addr, false)
+				if err != nil {
+					addr, pool = c.getRandomPoolInner()
+				} else {
+					c.pools[addr] = pool
+				}
+			}
 		}
 
 		if pool == nil {
@@ -314,7 +347,7 @@ func (c *Cluster) resetInner() error {
 		if slotPool, ok = c.pools[slotAddr]; ok {
 			pools[slotAddr] = slotPool
 		} else {
-			slotPool, err = newPool(slotAddr, c.o.Timeout, c.o.PoolSize)
+			slotPool, err = c.newPool(slotAddr, true)
 			if err != nil {
 				return err
 			}
@@ -325,6 +358,7 @@ func (c *Cluster) resetInner() error {
 	for addr := range c.pools {
 		if _, ok := pools[addr]; !ok {
 			c.pools[addr].Empty()
+			delete(c.poolThrottles, addr)
 		}
 	}
 	c.pools = pools
@@ -337,10 +371,8 @@ func (c *Cluster) resetInner() error {
 // * If err == nil, return reply
 // * If err is a client error:
 // 		* If MOVED:
-//			* If node not tried before, go to top with that node
-//			* Otherwise if we haven't Reset, do that and go to top with random
-//			  node
-//			* Otherwise error out
+// 			* Reset, if we haven't before (otherwise error out)
+//			* go to top with node we were told we moved to
 //		* If ASK (same as MOVED, but call ASKING beforehand and don't modify
 //		  slots)
 // 		* Otherwise return the error
@@ -452,39 +484,21 @@ func (c *Cluster) clientCmd(
 	moved := strings.HasPrefix(msg, "MOVED ")
 	ask = strings.HasPrefix(msg, "ASK ")
 	if moved || ask {
-		slot, addr := redirectInfo(msg)
+		_, addr := redirectInfo(msg)
 		c.callCh <- func(c *Cluster) {
 			c.Misses++
 		}
 
-		// if we already tried the node we've been told to try, Reset and
-		// try again with a random node. If that still doesn't work, or we
-		// already did that once, bail hard
-		if haveTried(tried, addr) {
-			if haveReset {
-				return errorReplyf("Cluster doesn't make sense, %s might be gone", addr)
-			}
-			if resetErr := c.Reset(); resetErr != nil {
-				return errorReplyf("Could not get cluster info: %s", resetErr)
-			}
-			addr, client, getErr := c.getConn("", "")
-			if getErr != nil {
-				return errorReplyf("No available cluster nodes: %s", getErr)
-			}
-
-			// we go back to scratch here, pretend we haven't tried any
-			// since we just picked a random node, it's likely we'll get a
-			// redirect. We won't reset again so this doesn't hurt too much
-			return c.clientCmd(addr, client, cmd, args, false, nil, true)
-
-			// We don't want to change the slot if we've tried this address for this
-			// slot before, it changed it the last time probably and obiously it
-			// doesn't work anyway
-		} else if moved {
-			c.callCh <- func(c *Cluster) {
-				c.mapping[slot] = addr
-			}
+		// If we've already called Reset and we're getting MOVED again than
+		// the cluster is having problems, likely telling us to try a node which
+		// is not reachable. Not much which can be done at this point
+		if haveReset {
+			return errorReplyf("Cluster doesn't make sense, %s might be gone", addr)
 		}
+		if resetErr := c.Reset(); resetErr != nil {
+			return errorReplyf("Could not get cluster info: %s", resetErr)
+		}
+		haveReset = true
 
 		// At this point addr is whatever redis told us it should be. However,
 		// if we can't get a connection to it we'll never actually mark it as
