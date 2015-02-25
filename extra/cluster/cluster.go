@@ -279,7 +279,6 @@ func (c *Cluster) Reset() error {
 }
 
 func (c *Cluster) resetInner() error {
-
 	// Throttle resetting so a bunch of routines can call Reset at once and the
 	// server won't be spammed. We don't a throttle until the second Reset is
 	// called, so the initial call inside New goes through correctly
@@ -297,6 +296,14 @@ func (c *Cluster) resetInner() error {
 	if p == nil {
 		return fmt.Errorf("no available nodes to call CLUSTER SLOTS on")
 	}
+
+	return c.resetInnerUsingPool(addr, p)
+}
+
+func (c *Cluster) resetInnerUsingPool(addr string, p *pool.Pool) error {
+	// If we move the throttle check to be in here we'll have to fix the test in
+	// TestReset, since it depends on being able to call Reset right after
+	// initializing the cluster
 
 	client, err := p.Get()
 	if err != nil {

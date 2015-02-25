@@ -57,11 +57,19 @@ func TestReset(t *T) {
 	assert.Nil(t, err)
 	cluster.pools["127.0.0.1:6379"] = p
 
-	err = cluster.Reset()
-	assert.Nil(t, err)
+	// We use resetInnerUsingPool so that we can specifically specify the pool
+	// being used, so we don't accidentally use the 6379 one (which doesn't have
+	// CLUSTER commands)
+	respCh := make(chan bool)
+	cluster.callCh <- func(c *Cluster) {
+		err := cluster.resetInnerUsingPool("127.0.0.1:7000", old7000Pool)
+		assert.Nil(t, err)
+		respCh <- true
+	}
+	<-respCh
 
 	// Prove that the bogus client is closed
-	_, ok := cluster.pools["127.0.0.:6379"]
+	_, ok := cluster.pools["127.0.0.1:6379"]
 	assert.Equal(t, false, ok)
 
 	// Prove that the remaining two addresses are still in clients, were not
