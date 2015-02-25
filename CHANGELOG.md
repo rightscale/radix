@@ -11,6 +11,13 @@
 
 * * *
 
+### 2015-2-25 Release v0.5.4
+
++ Add Pattern field to SubRepy in extra/pubsub
++ DialTimeout now uses DialTimeout, instead of only using timeout value for
+  read/write timeouts
++ Fix multiple bugs in extra/cluster that prevented proper failover
+
 ### 2015-1-31 Release v0.5.3
 
 + Add throttle to Reset calls in cluster
