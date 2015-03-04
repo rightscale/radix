@@ -73,6 +73,23 @@ func NewPool(network, addr string, size int) (*Pool, error) {
 	return NewCustomPool(network, addr, size, redis.Dial)
 }
 
+// Calls NewCustomPool, but if there is an error it return a pool of the same size but
+// without any connections pre-initialized (can be used the same way, but if
+// this happens there might be something wrong with the redis instance you're
+// connecting to)
+func NewOrEmptyCustomPool(network, addr string, size int, df DialFunc) *Pool {
+	pool, err := NewCustomPool(network, addr, size, df)
+	if err != nil {
+		pool = &Pool{
+			network: network,
+			addr:    addr,
+			pool:    make(chan *redis.Client, size),
+			df:      df,
+		}
+	}
+	return pool
+}
+
 // Calls NewPool, but if there is an error it return a pool of the same size but
 // without any connections pre-initialized (can be used the same way, but if
 // this happens there might be something wrong with the redis instance you're
