@@ -42,7 +42,7 @@ func TestPutMaster(t *testing.T) {
 }
 
 func newSentinelClient(t *testing.T, redisMaster string) *Client {
-	sentinelClient, err := NewClient("tcp", "localhost:26379", 1, redisMaster)
+	sentinelClient, err := NewClient("tcp", "localhost:26379", 1, 1, redisMaster)
 	if err != nil {
 		t.Fatal(err)
 	}
