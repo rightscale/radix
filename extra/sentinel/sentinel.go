@@ -61,9 +61,10 @@ type switchMaster struct {
 }
 
 type Client struct {
-	poolSize    int
-	masterPools map[string]*pool.Pool
-	subClient   *pubsub.SubClient
+	initPoolSize int
+	poolSize     int
+	masterPools  map[string]*pool.Pool
+	subClient    *pubsub.SubClient
 
 	getCh   chan *getReq
 	putCh   chan *putReq
@@ -80,7 +81,7 @@ type Client struct {
 // for any master should sentinel decide to fail the master over. The returned
 // error is a *ClientError.
 func NewClient(
-	network, address string, poolSize int, names ...string,
+	network, address string, initPoolSize, poolSize int, names ...string,
 ) (
 	*Client, error,
 ) {
@@ -102,7 +103,7 @@ func NewClient(
 			return nil, &ClientError{err: err, SentinelErr: true}
 		}
 		addr := l[3] + ":" + l[5]
-		pool, err := pool.NewPool("tcp", addr, poolSize)
+		pool, err := pool.NewPool("tcp", addr, initPoolSize, poolSize)
 		if err != nil {
 			return nil, &ClientError{err: err}
 		}
@@ -117,6 +118,7 @@ func NewClient(
 	}
 
 	c := &Client{
+		initPoolSize:   initPoolSize,
 		poolSize:       poolSize,
 		masterPools:    masterPools,
 		subClient:      subClient,
@@ -197,7 +199,7 @@ func (c *Client) spin() {
 				log.Printf("[SentinelClient] Connecting to new '%s' master with addr: '%s'\n", sm.name, sm.addr)
 
 				p.Empty()
-				p = pool.NewOrEmptyPool("tcp", sm.addr, c.poolSize)
+				p = pool.NewOrEmptyPool("tcp", sm.addr, c.initPoolSize, c.poolSize)
 				c.masterPools[sm.name] = p
 			}
 

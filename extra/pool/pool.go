@@ -14,11 +14,12 @@ type Pool struct {
 }
 
 // Creates a new Pool whose connections are all created using
-// redis.Dial(network, addr). The size indicates the maximum number of idle
-// connections to have waiting to be used at any given moment
-func NewPool(network, addr string, size int) (*Pool, error) {
+// redis.Dial(network, addr). The maxSize indicates the maximum number of idle
+// connections to have waiting to be used at any given moment; and the initSize
+// indicates how many connections to open upfront
+func NewPool(network, addr string, initSize, maxSize int) (*Pool, error) {
 	var err error
-	pool := make([]*redis.Client, size)
+	pool := make([]*redis.Client, initSize)
 	for i := range pool {
 		if pool[i], err = redis.Dial(network, addr); err != nil {
 			return nil, err
@@ -27,7 +28,7 @@ func NewPool(network, addr string, size int) (*Pool, error) {
 	p := Pool{
 		network: network,
 		addr:    addr,
-		pool:    make(chan *redis.Client, len(pool)),
+		pool:    make(chan *redis.Client, maxSize),
 	}
 	for i := range pool {
 		p.pool <- pool[i]
@@ -39,13 +40,13 @@ func NewPool(network, addr string, size int) (*Pool, error) {
 // without any connections pre-initialized (can be used the same way, but if
 // this happens there might be something wrong with the redis instance you're
 // connecting to)
-func NewOrEmptyPool(network, addr string, size int) *Pool {
-	pool, err := NewPool(network, addr, size)
+func NewOrEmptyPool(network, addr string, initSize, maxSize int) *Pool {
+	pool, err := NewPool(network, addr, initSize, maxSize)
 	if err != nil {
 		pool = &Pool{
 			network: network,
 			addr:    addr,
-			pool:    make(chan *redis.Client, size),
+			pool:    make(chan *redis.Client, maxSize),
 		}
 	}
 	return pool
