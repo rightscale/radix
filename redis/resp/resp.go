@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"reflect"
 	"strconv"
 )
@@ -104,7 +105,7 @@ func bufioReadMessage(r *bufio.Reader) (*Message, error) {
 }
 
 func readSimpleStr(r *bufio.Reader) (*Message, error) {
-	b, err := r.ReadBytes(delimEnd)
+	b, err := readBytesWithTimeout(r)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +113,7 @@ func readSimpleStr(r *bufio.Reader) (*Message, error) {
 }
 
 func readError(r *bufio.Reader) (*Message, error) {
-	b, err := r.ReadBytes(delimEnd)
+	b, err := readBytesWithTimeout(r)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +121,7 @@ func readError(r *bufio.Reader) (*Message, error) {
 }
 
 func readInt(r *bufio.Reader) (*Message, error) {
-	b, err := r.ReadBytes(delimEnd)
+	b, err := readBytesWithTimeout(r)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +133,7 @@ func readInt(r *bufio.Reader) (*Message, error) {
 }
 
 func readBulkStr(r *bufio.Reader) (*Message, error) {
-	b, err := r.ReadBytes(delimEnd)
+	b, err := readBytesWithTimeout(r)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +174,7 @@ func readBulkStr(r *bufio.Reader) (*Message, error) {
 }
 
 func readArray(r *bufio.Reader) (*Message, error) {
-	b, err := r.ReadBytes(delimEnd)
+	b, err := readBytesWithTimeout(r)
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +196,19 @@ func readArray(r *bufio.Reader) (*Message, error) {
 		b = append(b, m.raw...)
 	}
 	return &Message{Type: Array, val: arr, raw: b}, nil
+}
+
+func readBytesWithTimeout(r *bufio.Reader) ([]byte, error) {
+	b, err := r.ReadBytes(delimEnd)
+	if err != nil {
+		if t, ok := err.(*net.OpError); ok && t.Timeout() && len(b) > 0 {
+			msg := fmt.Sprintf("Timeout error with partially read data: '%v'\n", err)
+			return nil, errors.New(msg)
+		}
+		return nil, err
+	}
+
+	return b, err
 }
 
 // Bytes returns a byte slice representing the value of the Message. Only valid
