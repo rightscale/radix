@@ -164,10 +164,13 @@ func (c *Client) writeRequest(requests ...*request) error {
 func (c *Client) parse() *Reply {
 	m, err := resp.ReadMessage(c.reader)
 	if err != nil {
-		if t, ok := err.(*net.OpError); !ok || !t.Timeout() {
-			// close connection except timeout
-			c.Close()
-		}
+		// used to be:
+		// if t, ok := err.(*net.OpError); !ok || !t.Timeout() {
+		// however how can we guarantee that the other end wont
+		// write the response after we got the read timeout? If
+		// that happens then we would get that response as the
+		// response for the next request.
+		c.Close()
 		return &Reply{Type: ErrorReply, Err: err}
 	}
 	r, err := messageToReply(m)
