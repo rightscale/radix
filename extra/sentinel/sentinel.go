@@ -111,10 +111,12 @@ type switchMaster struct {
 }
 
 type Client struct {
-	logger      *logging.LoggerWithPrefix
-	poolSize    int
-	masterPools map[string]*pool.Pool
-	subClient   *pubsub.SubClient
+	logger *logging.LoggerWithPrefix
+
+	initPoolSize int
+	poolSize     int
+	masterPools  map[string]*pool.Pool
+	subClient    *pubsub.SubClient
 
 	getCh   chan *getReq
 	putCh   chan *putReq
@@ -137,17 +139,20 @@ func NewClient(
 ) (
 	*Client, error,
 ) {
-	return NewClientWithLogger(logging.NewNilLogger(), network, address, poolSize, names...)
+	return NewClientWithLogger(logging.NewNilLogger(), network, address, poolSize, poolSize, names...)
 }
 
 func NewClientWithLogger(
-	logger logging.SimpleLogger, network, address string, poolSize int, names ...string,
+	logger logging.SimpleLogger, network, address string, initPoolSize, poolSize int, names ...string,
 ) (
 	*Client, error,
 ) {
 	prefixedLogger := logging.NewLoggerWithPrefix("[SC]", logger)
 	initLogger := prefixedLogger.WithAnotherPrefix("[init]")
 
+	initLogger.Infof("Setting up with network:%s, addr:%s, masterNames:%v, "+
+		"initPoolSize:%d, softMaxPoolSize:%d",
+		network, address, names, initPoolSize, poolSize)
 	//
 	// Connect to sentinel
 	// We use this to fetch initial details about masters before we upgrade it
@@ -171,7 +176,9 @@ func NewClientWithLogger(
 			return nil, &ClientError{err: err, SentinelErr: true}
 		}
 		addr := l[3] + ":" + l[5]
-		pool, err := pool.NewPool("tcp", addr, poolSize)
+
+		initLogger.Infof("Setting up Redis Connection Pool with addr: '%s'", addr)
+		pool, err := pool.NewPool("tcp", addr, initPoolSize, poolSize)
 		if err != nil {
 			initLogger.Infof("Init redis connection pool for redis master '%s' errored: %v", addr, err)
 			return nil, &ClientError{err: err}
@@ -191,6 +198,7 @@ func NewClientWithLogger(
 
 	initLogger.Infof("Subscribed to +switch-master events")
 	c := &Client{
+		initPoolSize:   initPoolSize,
 		poolSize:       poolSize,
 		masterPools:    masterPools,
 		subClient:      subClient,
@@ -301,7 +309,10 @@ func (c *Client) spin() {
 
 				logger.Infof("Emptying current master pool '%s'", sm.name)
 				p.Empty()
-				p = pool.NewOrEmptyPool("tcp", sm.addr, c.poolSize)
+
+				logger.Infof("Initializing new master pool for '%s'", sm.name)
+				p = pool.NewOrEmptyPool("tcp", sm.addr, c.initPoolSize, c.poolSize)
+
 				c.masterPools[sm.name] = p
 				logger.Infof("Completed master switch for '%s' master with addr: '%s'",
 					sm.name, sm.addr)

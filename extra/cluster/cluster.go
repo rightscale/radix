@@ -166,7 +166,7 @@ func (c *Cluster) newPool(addr string, clearThrottle bool) (*pool.Pool, error) {
 	df := func(network, addr string) (*redis.Client, error) {
 		return redis.DialTimeout(network, addr, c.o.Timeout)
 	}
-	p, err := pool.NewCustomPool("tcp", addr, c.o.PoolSize, df)
+	p, err := pool.NewCustomPool("tcp", addr, c.o.PoolSize, c.o.PoolSize, df)
 	if err != nil {
 		c.poolThrottles[addr] = time.After(c.o.PoolThrottle)
 		return nil, err
