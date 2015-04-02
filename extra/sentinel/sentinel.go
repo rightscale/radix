@@ -114,9 +114,10 @@ type switchMaster struct {
 type Client struct {
 	logger *logging.LoggerWithPrefix
 
-	poolSize    int
-	masterPools map[string]*pool.Pool
-	subClient   *pubsub.SubClient
+	initPoolSize int
+	poolSize     int
+	masterPools  map[string]*pool.Pool
+	subClient    *pubsub.SubClient
 
 	getCh   chan *getReq
 	putCh   chan *putReq
@@ -144,13 +145,15 @@ func NewClient(network, address string, poolSize int, names ...string) (*Client,
 	heartbeatPeriod := time.Duration(0)
 
 	return NewClientWithLogger(
-		logging.NewNilLogger(), network, address, sentinelTimeouts, redisTimeouts, heartbeatPeriod, poolSize, names...)
+		logging.NewNilLogger(), network, address,
+		sentinelTimeouts, redisTimeouts, heartbeatPeriod,
+		poolSize, poolSize, names...)
 }
 
 func NewClientWithLogger(
 	logger logging.SimpleLogger, network, address string,
 	sentinelTimeouts, redisTimeouts redis.Timeouts, heartbeatPeriod time.Duration,
-	poolSize int, names ...string,
+	initPoolSize, poolSize int, names ...string,
 ) (
 	*Client, error,
 ) {
@@ -189,7 +192,7 @@ func NewClientWithLogger(
 		df := func(network, addr string) (*redis.Client, error) {
 			return redis.DialTimeouts(network, addr, redisTimeouts)
 		}
-		pool, err := pool.NewCustomPool("tcp", addr, poolSize, df)
+		pool, err := pool.NewCustomPool("tcp", addr, initPoolSize, poolSize, df)
 		if err != nil {
 			client.Close()
 			initLogger.Infof("Init redis connection pool for redis master '%s' errored: %v", addr, err)
@@ -225,6 +228,7 @@ func NewClientWithLogger(
 
 	c := &Client{
 		logger:           prefixedLogger,
+		initPoolSize:     initPoolSize,
 		poolSize:         poolSize,
 		masterPools:      masterPools,
 		subClient:        subClient,
@@ -419,7 +423,7 @@ func (c *Client) spin() {
 					return redis.DialTimeouts(network, addr, c.redisTimeouts)
 				}
 
-				p = pool.NewOrEmptyCustomPool("tcp", sm.addr, c.poolSize, df)
+				p = pool.NewOrEmptyCustomPool("tcp", sm.addr, c.initPoolSize, c.poolSize, df)
 				c.masterPools[sm.name] = p
 				logger.Infof("Completed master switch for '%s' master with addr: '%s'",
 					sm.name, sm.addr)
