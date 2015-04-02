@@ -157,15 +157,17 @@ func NewClientWithLogger(
 ) (
 	*Client, error,
 ) {
-	prefixedLogger := logging.NewLoggerWithPrefix("[SentinelClient]", logger)
+	prefixedLogger := logging.NewLoggerWithPrefix("[SC]", logger)
 	initLogger := prefixedLogger.WithAnotherPrefix("[init]")
 
+	initLogger.Infof("Setting up with network:%s, addr:%s, masterNames:%v, sentinelTimeouts:%v, "+
+		"redisTimeouts:%v, heartbeatPeriod:%s, initPoolSize:%d, softMaxPoolSize:%d",
+		network, address, names, sentinelTimeouts, redisTimeouts, heartbeatPeriod, initPoolSize, poolSize)
 	//
 	// Connect to sentinel
 	// We use this to fetch initial details about masters before we upgrade it
 	// to a pubsub client
-	initLogger.Infof("Connecting to Sentinel with addr: '%s'. Setting timeouts: %v",
-		address, sentinelTimeouts)
+	initLogger.Infof("Connecting to Sentinel with addr: '%s'", address)
 	client, err := redis.DialTimeouts(network, address, sentinelTimeouts)
 	if err != nil {
 		initLogger.Infof("Connecting to sentinel with addr='%s' errored: %v", address, err)
@@ -187,8 +189,7 @@ func NewClientWithLogger(
 		}
 		addr := l[3] + ":" + l[5]
 
-		initLogger.Infof("Setting up Redis Connection Pool with addr: '%s' and timeouts: %v",
-			addr, redisTimeouts)
+		initLogger.Infof("Setting up Redis Connection Pool with addr: '%s'", addr)
 		df := func(network, addr string) (*redis.Client, error) {
 			return redis.DialTimeouts(network, addr, redisTimeouts)
 		}
@@ -255,7 +256,7 @@ func NewClientWithLogger(
 
 func (c *Client) subSendHeartbeatsSpin(heartbeatPeriod time.Duration) {
 	logger := c.logger.WithAnotherPrefix("[HealthCheck]")
-	logger.Infof("Initializing heartbeats with heartbeat period=%s", heartbeatPeriod)
+	logger.Infof("Initializing heartbeats")
 
 	healthCheckTicker := time.NewTicker(heartbeatPeriod)
 	defer healthCheckTicker.Stop()
