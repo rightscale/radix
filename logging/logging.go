@@ -29,7 +29,7 @@ func NewNilLogger() SimpleLogger {
 //--------------------------------------------------------------------
 type LoggerWithPrefix struct {
 	prefix        string
-	WrappedLogger SimpleLogger
+	wrappedLogger SimpleLogger
 }
 
 var _ SimpleLogger = &LoggerWithPrefix{}
@@ -43,29 +43,33 @@ func NewLoggerWithPrefix(prefix string, logger SimpleLogger) *LoggerWithPrefix {
 	} else {
 		return &LoggerWithPrefix{
 			prefix:        prefix,
-			WrappedLogger: logger,
+			wrappedLogger: logger,
 		}
 	}
 }
 
 func (l *LoggerWithPrefix) Debugf(format string, v ...interface{}) {
-	l.WrappedLogger.Debugf(l.joinPrefix(format), v...)
+	l.wrappedLogger.Debugf(l.joinPrefix(format), v...)
 }
 func (l *LoggerWithPrefix) Infof(format string, v ...interface{}) {
-	l.WrappedLogger.Infof(l.joinPrefix(format), v...)
+	l.wrappedLogger.Infof(l.joinPrefix(format), v...)
 }
 func (l *LoggerWithPrefix) Warnf(format string, v ...interface{}) {
-	l.WrappedLogger.Warnf(l.joinPrefix(format), v...)
+	l.wrappedLogger.Warnf(l.joinPrefix(format), v...)
 }
 func (l *LoggerWithPrefix) Errorf(format string, v ...interface{}) {
-	l.WrappedLogger.Errorf(l.joinPrefix(format), v...)
+	l.wrappedLogger.Errorf(l.joinPrefix(format), v...)
+}
+
+func (l *LoggerWithPrefix) WrappedLogger() SimpleLogger {
+	return l.wrappedLogger
 }
 
 // WithAnotherPrefix returns a new LoggerWithPrefix that keeps the same wrapped logger, but concatenates another prefix
 func (l *LoggerWithPrefix) WithAnotherPrefix(prefix string) *LoggerWithPrefix {
 	return &LoggerWithPrefix{
 		prefix:        l.prefix + prefix,
-		WrappedLogger: l.WrappedLogger,
+		wrappedLogger: l.wrappedLogger,
 	}
 }
 
