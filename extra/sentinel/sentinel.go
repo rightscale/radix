@@ -292,6 +292,11 @@ func (c *Client) spin() {
 
 			c.alwaysErr = err
 
+			for name, p := range c.masterPools {
+				logger.Infof("Emptying master pool '%s'", name)
+				p.Empty()
+			}
+
 		case sm := <-c.switchMasterCh:
 			logger := c.logger.WithAnotherPrefix("[SwitchMaster]")
 
