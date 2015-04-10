@@ -167,12 +167,14 @@ func NewClientWithLogger(
 		r := client.Cmd("SENTINEL", "MASTER", name)
 		l, err := r.List()
 		if err != nil {
+			client.Close()
 			initLogger.Infof("Sentinel master command for redis master '%s' errored: %v", address, err)
 			return nil, &ClientError{err: err, SentinelErr: true}
 		}
 		addr := l[3] + ":" + l[5]
 		pool, err := pool.NewPool("tcp", addr, poolSize)
 		if err != nil {
+			client.Close()
 			initLogger.Infof("Init redis connection pool for redis master '%s' errored: %v", addr, err)
 			return nil, &ClientError{err: err}
 		}
@@ -183,8 +185,18 @@ func NewClientWithLogger(
 	// Upgrade sentinel client connection to pubSub Client
 	initLogger.Infof("Subscribing to +switch-master events")
 	subClient := pubsub.NewSubClient(client)
+
+	// TODO: seems like a race condition. What if redis switched between the SENTINEL MASTER command
+	// and this command?
 	r := subClient.Subscribe("+switch-master")
 	if r.Err != nil {
+		client.Close()
+
+		for name := range masterPools {
+			initLogger.Infof("Emptying master pool %s", name)
+			masterPools[name].Empty()
+		}
+
 		initLogger.Infof("Subscribe call to +switch-master errored: %v", err)
 		return nil, &ClientError{err: r.Err, SentinelErr: true}
 	}
