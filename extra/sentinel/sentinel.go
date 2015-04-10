@@ -125,6 +125,9 @@ type Client struct {
 	switchMasterCh chan *switchMaster
 
 	reqId uint64
+
+	redisTimeouts    redis.Timeouts
+	sentinelTimeouts redis.Timeouts
 }
 
 // Creates a sentinel client. Connects to the given sentinel instance, pulls the
@@ -132,27 +135,32 @@ type Client struct {
 // connections for each master. The client will automatically replace the pool
 // for any master should sentinel decide to fail the master over. The returned
 // error is a *ClientError.
-func NewClient(
-	network, address string, poolSize int, names ...string,
-) (
-	*Client, error,
-) {
-	return NewClientWithLogger(logging.NewNilLogger(), network, address, poolSize, names...)
+func NewClient(network, address string, poolSize int, names ...string) (*Client, error) {
+	sentinelTimeouts := redis.Timeouts{}
+	redisTimeouts := redis.Timeouts{}
+
+	return NewClientWithLogger(
+		logging.NewNilLogger(), network, address, sentinelTimeouts, redisTimeouts, poolSize, names...)
 }
 
 func NewClientWithLogger(
-	logger logging.SimpleLogger, network, address string, poolSize int, names ...string,
+	logger logging.SimpleLogger, network, address string,
+	sentinelTimeouts, redisTimeouts redis.Timeouts, poolSize int, names ...string,
 ) (
 	*Client, error,
 ) {
 	prefixedLogger := logging.NewLoggerWithPrefix("[SC]", logger)
 	initLogger := prefixedLogger.WithAnotherPrefix("[init]")
 
+	initLogger.Infof("Setting up with network:%s, addr:%s, masterNames:%v, sentinelTimeouts:%v, "+
+		"redisTimeouts:%v, softMaxPoolSize:%d",
+		network, address, names, sentinelTimeouts, redisTimeouts, poolSize)
 	//
 	// Connect to sentinel
 	// We use this to fetch initial details about masters before we upgrade it
 	// to a pubsub client
-	client, err := redis.Dial(network, address)
+	initLogger.Infof("Connecting to Sentinel with addr: '%s'", address)
+	client, err := redis.DialTimeouts(network, address, sentinelTimeouts)
 	if err != nil {
 		initLogger.Infof("Connecting to sentinel with addr='%s' errored: %v", address, err)
 		return nil, &ClientError{err: err}
@@ -171,7 +179,12 @@ func NewClientWithLogger(
 			return nil, &ClientError{err: err, SentinelErr: true}
 		}
 		addr := l[3] + ":" + l[5]
-		pool, err := pool.NewPool("tcp", addr, poolSize)
+
+		initLogger.Infof("Setting up Redis Connection Pool with addr: '%s'", addr)
+		df := func(network, addr string) (*redis.Client, error) {
+			return redis.DialTimeouts(network, addr, redisTimeouts)
+		}
+		pool, err := pool.NewCustomPool("tcp", addr, poolSize, df)
 		if err != nil {
 			initLogger.Infof("Init redis connection pool for redis master '%s' errored: %v", addr, err)
 			return nil, &ClientError{err: err}
@@ -189,7 +202,11 @@ func NewClientWithLogger(
 		return nil, &ClientError{err: r.Err, SentinelErr: true}
 	}
 
+	// Clear read timeouts since otherwise we run into the risk to hit a deadline
+	// while reading.
+	subClient.Client.ChangeReadTimeout(time.Duration(0))
 	initLogger.Infof("Subscribed to +switch-master events")
+
 	c := &Client{
 		poolSize:       poolSize,
 		masterPools:    masterPools,
@@ -199,8 +216,12 @@ func NewClientWithLogger(
 		closeCh:        make(chan struct{}),
 		alwaysErrCh:    make(chan *ClientError),
 		switchMasterCh: make(chan *switchMaster),
-		reqId:          newReqId(),
 		logger:         prefixedLogger,
+
+		reqId: newReqId(),
+
+		redisTimeouts:    redisTimeouts,
+		sentinelTimeouts: sentinelTimeouts,
 	}
 
 	go c.subSpin()
@@ -301,7 +322,13 @@ func (c *Client) spin() {
 
 				logger.Infof("Emptying current master pool '%s'", sm.name)
 				p.Empty()
-				p = pool.NewOrEmptyPool("tcp", sm.addr, c.poolSize)
+				logger.Infof("Initializing new master pool for '%s' and timeouts: %v", sm.name, c.redisTimeouts)
+
+				df := func(network, addr string) (*redis.Client, error) {
+					return redis.DialTimeouts(network, addr, c.redisTimeouts)
+				}
+
+				p = pool.NewOrEmptyCustomPool("tcp", sm.addr, c.poolSize, df)
 				c.masterPools[sm.name] = p
 				logger.Infof("Completed master switch for '%s' master with addr: '%s'",
 					sm.name, sm.addr)
