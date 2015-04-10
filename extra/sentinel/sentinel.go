@@ -292,6 +292,9 @@ func (c *Client) spin() {
 
 			c.alwaysErr = err
 
+			logger.Infof("Closing pub/sub sentinel client connection")
+			c.subClient.Client.Close()
+
 		case sm := <-c.switchMasterCh:
 			logger := c.logger.WithAnotherPrefix("[SwitchMaster]")
 
