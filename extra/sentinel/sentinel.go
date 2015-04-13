@@ -280,10 +280,15 @@ func (c *Client) spin() {
 
 			logger.Debugf("Received request")
 
-			if pool, ok := c.masterPools[req.name]; ok {
+			// When alwaysErr is set, the client can’t be used anymore. Hence when
+			// checking in connections, we should close them.
+			if c.alwaysErr != nil {
+				logger.Warnf("Closing connection due to alwaysErr being set.")
+				req.conn.Close()
+			} else if pool, ok := c.masterPools[req.name]; ok {
 				logger.Debugf("Returning connection to '%s' pool.", req.name)
 				pool.Put(req.conn)
-			}
+			} // TODO: else? Close connection?
 			logger.Debugf("Completed request in %s.", time.Since(startTime))
 
 		case err := <-c.alwaysErrCh:
@@ -291,6 +296,11 @@ func (c *Client) spin() {
 			logger.Infof("Unrecoverable error encountered: '%s'", err.Error())
 
 			c.alwaysErr = err
+
+			for name, p := range c.masterPools {
+				logger.Infof("Emptying master pool '%s'", name)
+				p.Empty()
+			}
 
 		case sm := <-c.switchMasterCh:
 			logger := c.logger.WithAnotherPrefix("[SwitchMaster]")
