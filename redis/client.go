@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rightscale/radix/redis/resp"
+	"sync"
 )
 
 const (
@@ -19,17 +20,25 @@ const (
 var LoadingError error = errors.New("server is busy loading dataset in memory")
 var PipelineQueueEmptyError error = errors.New("pipeline queue empty")
 
+type Timeouts struct {
+	ConnectionTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+}
+
 //* Client
 
 // Client describes a Redis client.
 type Client struct {
 	// The connection the client talks to redis over. Don't touch this unless
 	// you know what you're doing.
-	Conn      net.Conn
-	timeout   time.Duration
-	reader    *bufio.Reader
-	pending   []*request
-	completed []*Reply
+	Conn       net.Conn
+	rTimeout   time.Duration
+	rtimeoutMu sync.RWMutex
+	wTimeout   time.Duration
+	reader     *bufio.Reader
+	pending    []*request
+	completed  []*Reply
 }
 
 // request describes a client's request to the redis server
@@ -41,15 +50,22 @@ type request struct {
 // Dial connects to the given Redis server with the given timeout, which will be
 // used as the read/write timeout when communicating with redis
 func DialTimeout(network, addr string, timeout time.Duration) (*Client, error) {
+	// default is to use the same timeout for connection, read & write
+	timeouts := Timeouts{timeout, timeout, timeout}
+	return DialTimeouts(network, addr, timeouts)
+}
+
+func DialTimeouts(network, addr string, timeouts Timeouts) (*Client, error) {
 	// establish a connection
-	conn, err := net.DialTimeout(network, addr, timeout)
+	conn, err := net.DialTimeout(network, addr, timeouts.ConnectionTimeout)
 	if err != nil {
 		return nil, err
 	}
 
 	c := new(Client)
 	c.Conn = conn
-	c.timeout = timeout
+	c.rTimeout = timeouts.ReadTimeout
+	c.wTimeout = timeouts.WriteTimeout
 	c.reader = bufio.NewReaderSize(conn, bufSize)
 	return c, nil
 }
@@ -111,17 +127,31 @@ func (c *Client) GetReply() *Reply {
 	return r
 }
 
+// Change read timeout, applied immediately to connection
+func (c *Client) ChangeReadTimeout(rTimeout time.Duration) {
+	c.rtimeoutMu.Lock()
+	defer c.rtimeoutMu.Unlock()
+
+	if rTimeout == 0 {
+		c.Conn.SetReadDeadline(time.Time{}) // cancel rTimeout by setting a zero value
+	}
+	c.rTimeout = rTimeout
+}
+
 //* Private methods
 
 func (c *Client) setReadTimeout() {
-	if c.timeout != 0 {
-		c.Conn.SetReadDeadline(time.Now().Add(c.timeout))
+	c.rtimeoutMu.RLock()
+	defer c.rtimeoutMu.RUnlock()
+
+	if c.rTimeout != 0 {
+		c.Conn.SetReadDeadline(time.Now().Add(c.rTimeout))
 	}
 }
 
 func (c *Client) setWriteTimeout() {
-	if c.timeout != 0 {
-		c.Conn.SetWriteDeadline(time.Now().Add(c.timeout))
+	if c.wTimeout != 0 {
+		c.Conn.SetWriteDeadline(time.Now().Add(c.wTimeout))
 	}
 }
 
