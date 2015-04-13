@@ -124,6 +124,7 @@ type Client struct {
 	closeCh chan struct{}
 
 	alwaysErr      *ClientError
+	alwaysErrFlag  *AtomicFlag
 	alwaysErrCh    chan *ClientError
 	switchMasterCh chan *switchMaster
 
@@ -247,6 +248,8 @@ func NewClientWithLogger(
 
 		redisTimeouts:    redisTimeouts,
 		sentinelTimeouts: sentinelTimeouts,
+
+		alwaysErrFlag: &AtomicFlag{},
 	}
 
 	if heartbeatPeriod > 0 {
@@ -403,6 +406,7 @@ func (c *Client) spin() {
 			logger.Infof("Unrecoverable error encountered: '%s'", err.Error())
 
 			c.alwaysErr = err
+			c.alwaysErrFlag.Set()
 
 			for name, p := range c.masterPools {
 				logger.Infof("Emptying master pool '%s'", name)
@@ -540,6 +544,20 @@ func (c *Client) Close() {
 	c.logger.Infof("Closing all connection pools & sentinel connection...")
 	close(c.closeCh)
 }
+
+func (c *Client) IsClosed() bool {
+	select {
+	case <-c.closeCh:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) IsAlwaysErrorFlagSet() bool {
+	return c.alwaysErrFlag.IsSet()
+}
+
 func (c *Client) logRequestTiming(logger logging.SimpleLogger, startTime time.Time, requestType string) {
 	timeTaken := time.Since(startTime)
 	msg := fmt.Sprintf("%s request completed in %s", requestType, timeTaken)
