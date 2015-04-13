@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/rightscale/radix/redis/resp"
-	"sync"
 )
 
 const (
@@ -32,13 +31,12 @@ type Timeouts struct {
 type Client struct {
 	// The connection the client talks to redis over. Don't touch this unless
 	// you know what you're doing.
-	Conn       net.Conn
-	rTimeout   time.Duration
-	rtimeoutMu sync.RWMutex
-	wTimeout   time.Duration
-	reader     *bufio.Reader
-	pending    []*request
-	completed  []*Reply
+	Conn      net.Conn
+	rTimeout  *AtomicDuration
+	wTimeout  *AtomicDuration
+	reader    *bufio.Reader
+	pending   []*request
+	completed []*Reply
 }
 
 // request describes a client's request to the redis server
@@ -64,8 +62,8 @@ func DialTimeouts(network, addr string, timeouts Timeouts) (*Client, error) {
 
 	c := new(Client)
 	c.Conn = conn
-	c.rTimeout = timeouts.ReadTimeout
-	c.wTimeout = timeouts.WriteTimeout
+	c.rTimeout = NewAtomicDuration(timeouts.ReadTimeout)
+	c.wTimeout = NewAtomicDuration(timeouts.WriteTimeout)
 	c.reader = bufio.NewReaderSize(conn, bufSize)
 	return c, nil
 }
@@ -133,30 +131,24 @@ func (c *Client) GetReply() *Reply {
 }
 
 // Change read timeout, applied immediately to connection
-func (c *Client) ChangeReadTimeout(rTimeout time.Duration) {
-	c.rtimeoutMu.Lock()
-	defer c.rtimeoutMu.Unlock()
-
-	if rTimeout == 0 {
+func (c *Client) ChangeReadTimeout(newRTimeout time.Duration) {
+	if newRTimeout == 0 {
 		c.Conn.SetReadDeadline(time.Time{}) // cancel rTimeout by setting a zero value
 	}
-	c.rTimeout = rTimeout
+	c.rTimeout.Update(newRTimeout)
 }
 
 //* Private methods
 
 func (c *Client) setReadTimeout() {
-	c.rtimeoutMu.RLock()
-	defer c.rtimeoutMu.RUnlock()
-
-	if c.rTimeout != 0 {
-		c.Conn.SetReadDeadline(time.Now().Add(c.rTimeout))
+	if c.rTimeout.Value() != 0 {
+		c.Conn.SetReadDeadline(time.Now().Add(c.rTimeout.Value()))
 	}
 }
 
 func (c *Client) setWriteTimeout() {
-	if c.wTimeout != 0 {
-		c.Conn.SetWriteDeadline(time.Now().Add(c.wTimeout))
+	if c.wTimeout.Value() != 0 {
+		c.Conn.SetWriteDeadline(time.Now().Add(c.wTimeout.Value()))
 	}
 }
 
