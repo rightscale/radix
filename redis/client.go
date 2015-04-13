@@ -82,6 +82,11 @@ func (c *Client) Close() error {
 	return c.Conn.Close()
 }
 
+// Cmd calls the given Redis command but wont read the reply
+func (c *Client) CmdNoReply(cmd string, args ...interface{}) error {
+	return c.writeRequest(&request{cmd, args})
+}
+
 // Cmd calls the given Redis command.
 func (c *Client) Cmd(cmd string, args ...interface{}) *Reply {
 	err := c.writeRequest(&request{cmd, args})
