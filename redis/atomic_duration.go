@@ -16,7 +16,7 @@ func NewAtomicDuration(duration time.Duration) *AtomicDuration {
 }
 
 func (ad *AtomicDuration) Update(duration time.Duration) {
-	atomic.SwapInt64(&ad.value, duration.Nanoseconds())
+	atomic.StoreInt64(&ad.value, duration.Nanoseconds())
 }
 
 func (ad *AtomicDuration) Value() time.Duration {

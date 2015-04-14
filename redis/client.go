@@ -136,14 +136,16 @@ func (c *Client) ChangeReadTimeout(newRTimeout time.Duration) {
 //* Private methods
 
 func (c *Client) setReadTimeout() {
-	if c.rTimeout.Value() != 0 {
-		c.Conn.SetReadDeadline(time.Now().Add(c.rTimeout.Value()))
+	timeout := c.rTimeout.Value()
+	if timeout != 0 {
+		c.Conn.SetReadDeadline(time.Now().Add(timeout))
 	}
 }
 
 func (c *Client) setWriteTimeout() {
-	if c.wTimeout.Value() != 0 {
-		c.Conn.SetWriteDeadline(time.Now().Add(c.wTimeout.Value()))
+	timeout := c.wTimeout.Value()
+	if timeout != 0 {
+		c.Conn.SetWriteDeadline(time.Now().Add(timeout))
 	}
 }
 
