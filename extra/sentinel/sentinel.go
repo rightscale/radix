@@ -305,6 +305,14 @@ func (c *Client) spin() {
 
 		case err := <-c.alwaysErrCh:
 			logger := c.logger.WithAnotherPrefix("[AlwaysError]")
+
+			// if we have already set alwaysErr then we don't want to reset it since
+			// we want track the original error.
+			if c.alwaysErr != nil {
+				logger.Infof("Another unrecoverable error encountered: '%s'", err.Error())
+				continue
+			}
+
 			logger.Infof("Unrecoverable error encountered: '%s'", err.Error())
 
 			c.alwaysErr = err
