@@ -67,6 +67,7 @@ import (
 )
 
 const (
+	maxMissedHeartbeats       = 3
 	acceptableRequestDuration = time.Duration(1 * time.Second)
 )
 
@@ -124,10 +125,11 @@ type Client struct {
 	alwaysErrCh    chan *ClientError
 	switchMasterCh chan *switchMaster
 
-	reqId uint64
-
 	redisTimeouts    redis.Timeouts
 	sentinelTimeouts redis.Timeouts
+
+	reqId            uint64
+	missedHeartbeats uint32
 }
 
 // Creates a sentinel client. Connects to the given sentinel instance, pulls the
@@ -138,14 +140,16 @@ type Client struct {
 func NewClient(network, address string, poolSize int, names ...string) (*Client, error) {
 	sentinelTimeouts := redis.Timeouts{}
 	redisTimeouts := redis.Timeouts{}
+	heartbeatPeriod := time.Duration(0)
 
 	return NewClientWithLogger(
-		logging.NewNilLogger(), network, address, sentinelTimeouts, redisTimeouts, poolSize, names...)
+		logging.NewNilLogger(), network, address, sentinelTimeouts, redisTimeouts, heartbeatPeriod, poolSize, names...)
 }
 
 func NewClientWithLogger(
 	logger logging.SimpleLogger, network, address string,
-	sentinelTimeouts, redisTimeouts redis.Timeouts, poolSize int, names ...string,
+	sentinelTimeouts, redisTimeouts redis.Timeouts,
+	heartbeatPeriod time.Duration, poolSize int, names ...string,
 ) (
 	*Client, error,
 ) {
@@ -236,10 +240,63 @@ func NewClientWithLogger(
 		sentinelTimeouts: sentinelTimeouts,
 	}
 
+	if heartbeatPeriod > 0 {
+		go c.subSendHeartbeatsSpin(heartbeatPeriod)
+	}
 	go c.subSpin()
 	go c.spin()
+
 	initLogger.Infof("Initialization completed")
 	return c, nil
+}
+
+func (c *Client) subSendHeartbeatsSpin(heartbeatPeriod time.Duration) {
+	logger := c.logger.WithAnotherPrefix("[HealthCheck]")
+	logger.Infof("Initializing heartbeats")
+
+	healthCheckTicker := time.NewTicker(heartbeatPeriod)
+	defer healthCheckTicker.Stop()
+
+	for {
+		select {
+		case <-healthCheckTicker.C:
+
+			logger.Debugf("Sending heartbeat")
+			err := c.subClient.Client.CmdNoReply("SUBSCRIBE", "+switch-master")
+			if err != nil {
+				logger.Infof("Sending heartbeat failed with err: %s", err.Error())
+				c.submitSentinelError(logger, err)
+				return
+			}
+
+			// TODO: Avoid small race condition where the heartbeat has been received
+			//       and the heartbeat count has been reset to 0 before calling AddUint32.
+			//       Worst case is that we treat this case as a missed heartbeat.
+			missedHeartbeats := atomic.AddUint32(&c.missedHeartbeats, 1)
+			if missedHeartbeats > 1 { // only log if heartbeats have been missed
+				logger.Infof("Heartbeat sent (unacknowledged heartbeats=%d)", missedHeartbeats)
+			}
+
+			if missedHeartbeats > maxMissedHeartbeats {
+				// -1 because we have just sent one and can't assume that it will be missed
+				logger.Infof("Healthcheck Error: Too many heartbeats missed (missed heartbeats=%d).", missedHeartbeats-1)
+				c.submitSentinelError(logger, errors.New("Healthcheck Error: Stale connection."))
+				return
+			}
+		case <-c.closeCh:
+			logger.Infof("Handling 'closeCh' message.")
+			return
+		}
+	}
+}
+
+func (c *Client) submitSentinelError(prefixedLogger logging.SimpleLogger, err error) {
+	select {
+	case c.alwaysErrCh <- &ClientError{err: err, SentinelErr: true}:
+		prefixedLogger.Infof("Sent ClientError to 'alwaysErrCh' channel.")
+	case <-c.closeCh:
+		prefixedLogger.Infof("Handling 'closeCh' message.")
+	}
 }
 
 func (c *Client) subSpin() {
@@ -251,13 +308,21 @@ func (c *Client) subSpin() {
 			continue
 		}
 		if r.Err != nil {
-			select {
-			case c.alwaysErrCh <- &ClientError{err: r.Err, SentinelErr: true}:
-			case <-c.closeCh:
-			}
 			logger.Infof("Receive() returned error %v ", r.Err)
+			c.submitSentinelError(logger, r.Err)
 			return
 		}
+
+		// We are abusing the subscribe call as a health check since we are only allowed
+		// to call SUBSCRIBE / UNSUBSCRIBE on this connection
+		if r.Type == pubsub.SubscribeReply {
+			oldMissedHeartbeats := atomic.SwapUint32(&c.missedHeartbeats, 0)
+			if oldMissedHeartbeats > 1 { // only log if heartbeats have been missed
+				logger.Infof("Received heartbeat. Resetting missed heartbeat count from %d.", oldMissedHeartbeats)
+			}
+			continue
+		}
+
 		sMsg := strings.Split(r.Message, " ")
 		name := sMsg[0]
 		newAddr := sMsg[3] + ":" + sMsg[4]
