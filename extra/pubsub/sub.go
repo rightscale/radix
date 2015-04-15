@@ -110,6 +110,7 @@ func (c *SubClient) parseReply(reply *redis.Reply) *SubReply {
 	sr := &SubReply{Reply: reply}
 	switch reply.Type {
 	case redis.MultiReply:
+		// reply.Elems contains action performed, on what channel, remaining subscriptions
 		if len(reply.Elems) < 3 {
 			sr.Err = errors.New("reply is not formatted as a subscription reply")
 			return sr
