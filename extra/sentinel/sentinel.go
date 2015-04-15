@@ -346,8 +346,9 @@ func (c *Client) GetMaster(name string) (*redis.Client, error) {
 	c.getCh <- req
 	ret := <-req.retCh
 	if ret.err != nil {
-		logger.Warnf("GetMaster request failed with error: %s", ret.err.Error())
-		return nil, ret.err
+		msg := fmt.Sprintf("GetMaster request 'req-%s' failed. Error: %s", req.reqId, ret.err.Error())
+		logger.Warnf(msg)
+		return nil, errors.New(msg)
 	}
 
 	c.logRequestTiming(logger, startTime, "GetMaster")
