@@ -226,8 +226,8 @@ func (c *Client) subSendHeartbeatsSpin(heartbeatPeriod time.Duration) {
 	for {
 		select {
 		case <-healthCheckTicker.C:
-			logger.Infof("Sending heartbeat")
 
+			logger.Debugf("Sending heartbeat")
 			err := c.subClient.Client.CmdNoReply("SUBSCRIBE", "+switch-master")
 			if err != nil {
 				logger.Infof("Sending heartbeat failed with err: %s", err.Error())
@@ -235,11 +235,17 @@ func (c *Client) subSendHeartbeatsSpin(heartbeatPeriod time.Duration) {
 				return
 			}
 
+			// TODO: Avoid small race condition where the heartbeat has been received
+			//       and the heartbeat count has been reset to 0 before calling AddUint32.
+			//       Worst case is that we treat this case as a missed heartbeat.
 			missedHeartbeats := atomic.AddUint32(&c.missedHeartbeats, 1)
-			logger.Infof("Heartbeat sent (unacknowledged heartbeats=%d)", missedHeartbeats)
+			if missedHeartbeats > 1 { // only log if heartbeats have been missed
+				logger.Infof("Heartbeat sent (unacknowledged heartbeats=%d)", missedHeartbeats)
+			}
 
 			if missedHeartbeats > maxMissedHeartbeats {
-				logger.Infof("Too many heartbeats missed %d.", missedHeartbeats)
+				// -1 because we have just sent one and can't assume that it will be missed
+				logger.Infof("Healthcheck Error: Too many heartbeats missed (missed heartbeats=%d).", missedHeartbeats-1)
 				c.submitSentinelError(logger, errors.New("Healthcheck Error: Stale connection."))
 				return
 			}
@@ -277,7 +283,9 @@ func (c *Client) subSpin() {
 		// to call SUBSCRIBE / UNSUBSCRIBE on this connection
 		if r.Type == pubsub.SubscribeReply {
 			oldMissedHeartbeats := atomic.SwapUint32(&c.missedHeartbeats, 0)
-			logger.Infof("Received heartbeat. Resetting missed heartbeat count from %d.", oldMissedHeartbeats)
+			if oldMissedHeartbeats > 1 { // only log if heartbeats have been missed
+				logger.Infof("Received heartbeat. Resetting missed heartbeat count from %d.", oldMissedHeartbeats)
+			}
 			continue
 		}
 
