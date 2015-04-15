@@ -38,11 +38,11 @@ type DialFunc func(network, addr string) (*redis.Client, error)
 // 		}
 // 		return client, nil
 // 	}
-// 	p, _ := pool.NewCustomPool("tcp", "127.0.0.1:6379", 10, df)
+// 	p, _ := pool.NewCustomPool("tcp", "127.0.0.1:6379", 10, 10, df)
 //
-func NewCustomPool(network, addr string, size int, df DialFunc) (*Pool, error) {
-	pool := make([]*redis.Client, 0, size)
-	for i := 0; i < size; i++ {
+func NewCustomPool(network, addr string, initSize, maxSize int, df DialFunc) (*Pool, error) {
+	pool := make([]*redis.Client, 0, initSize)
+	for i := 0; i < initSize; i++ {
 		client, err := df(network, addr)
 		if err != nil {
 			for _, client = range pool {
@@ -54,57 +54,49 @@ func NewCustomPool(network, addr string, size int, df DialFunc) (*Pool, error) {
 			pool = append(pool, client)
 		}
 	}
-	p := Pool{
-		network: network,
-		addr:    addr,
-		pool:    make(chan *redis.Client, len(pool)),
-		df:      df,
-	}
+	p := NewEmptyCustomPool(network, addr, maxSize, df)
 	for i := range pool {
 		p.pool <- pool[i]
 	}
-	return &p, nil
+	return p, nil
 }
 
 // Creates a new Pool whose connections are all created using
-// redis.Dial(network, addr). The size indicates the maximum number of idle
-// connections to have waiting to be used at any given moment
-func NewPool(network, addr string, size int) (*Pool, error) {
-	return NewCustomPool(network, addr, size, redis.Dial)
+// redis.Dial(network, addr). The initSize indicates how many connections
+// to open upfront. The maxSize indicates the maximum number of idle
+// connections to have waiting to be used at any given moment.
+func NewPool(network, addr string, initSize, maxSize int) (*Pool, error) {
+	return NewCustomPool(network, addr, initSize, maxSize, redis.Dial)
 }
 
 // Calls NewCustomPool, but if there is an error it return a pool of the same size but
 // without any connections pre-initialized (can be used the same way, but if
 // this happens there might be something wrong with the redis instance you're
 // connecting to)
-func NewOrEmptyCustomPool(network, addr string, size int, df DialFunc) *Pool {
-	pool, err := NewCustomPool(network, addr, size, df)
+func NewOrEmptyCustomPool(network, addr string, initSize, maxSize int, df DialFunc) *Pool {
+	pool, err := NewCustomPool(network, addr, initSize, maxSize, df)
 	if err != nil {
-		pool = &Pool{
-			network: network,
-			addr:    addr,
-			pool:    make(chan *redis.Client, size),
-			df:      df,
-		}
+		pool = NewEmptyCustomPool(network, addr, maxSize, df)
 	}
 	return pool
 }
 
-// Calls NewPool, but if there is an error it return a pool of the same size but
+// Creates an empty Pool
+func NewEmptyCustomPool(network, addr string, maxSize int, df DialFunc) *Pool {
+	return &Pool{
+		network: network,
+		addr:    addr,
+		pool:    make(chan *redis.Client, maxSize),
+		df:      df,
+	}
+}
+
+// Creates a new Pool, but if there is an error it return a pool of the same size but
 // without any connections pre-initialized (can be used the same way, but if
 // this happens there might be something wrong with the redis instance you're
 // connecting to)
-func NewOrEmptyPool(network, addr string, size int) *Pool {
-	pool, err := NewPool(network, addr, size)
-	if err != nil {
-		pool = &Pool{
-			network: network,
-			addr:    addr,
-			pool:    make(chan *redis.Client, size),
-			df:      redis.Dial,
-		}
-	}
-	return pool
+func NewOrEmptyPool(network, addr string, initSize, maxSize int) *Pool {
+	return NewOrEmptyCustomPool(network, addr, initSize, maxSize, redis.Dial)
 }
 
 // Retrieves an available redis client. If there are none available it will
