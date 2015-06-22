@@ -193,7 +193,13 @@ func NewClientWithLogger(
 
 		initLogger.Infof("Setting up Redis Connection Pool with addr: '%s'", addr)
 
+		redisConnectionLogger := prefixedLogger.WithAnotherPrefix("[Pool]")
 		df := func(network, addr string) (*redis.Client, error) {
+			startTime := time.Now()
+			defer func() {
+				redisConnectionLogger.Debugf("Established new Redis connection in %s", time.Since(startTime))
+			}()
+
 			return redis.DialTimeouts(network, addr, redisTimeouts)
 		}
 		pool, err := pool.NewCustomPool("tcp", addr, initPoolSize, poolSize, df)
