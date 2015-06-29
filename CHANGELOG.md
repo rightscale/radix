@@ -11,6 +11,28 @@
 
 * * *
 
+### 2015-6-29 Release v0.7.1
+
++ Logging timing of establishing new redis connection
+
+### 2015-4-15 Release v0.7.0
+
++ added logger. started logging setup & errors
++ Emptying pools after setting c.alwaysErr
++ Close connection when checking in connection and alwaysErr is set
++ handling partially read data when timeout triggered
++ closing connection on any read timeout
++ added heartbeats to check for stale connections
++ Added flag to check if alwaysError is set
++ Closing connections on initialization failure
++ Not overwriting alwaysErr once it is set
++ closing SubClient connection on alwaysErr
++ added support for sentinel & redis timeouts
+
+### 2015-3-12 Release v0.6.0
+
++ lazy load the redis connections at the startup
+
 ### 2015-2-25 Release v0.5.4
 
 + Add Pattern field to SubRepy in extra/pubsub
