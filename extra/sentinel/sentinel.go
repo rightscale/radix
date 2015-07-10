@@ -191,7 +191,7 @@ func NewClientWithLogger(
 	c.poolDialFunc = func(network, addr string) (*redis.Client, error) {
 		startTime := time.Now()
 		defer func() {
-			redisConnectionLogger.Debugf("Established new Redis connection in %s", time.Since(startTime))
+			redisConnectionLogger.Debugf("Established new Redis connection(%s:%s) in %s", network, addr, time.Since(startTime))
 		}()
 
 		return cdf(network, addr, c.redisTimeouts)
