@@ -45,6 +45,9 @@ type request struct {
 	args []interface{}
 }
 
+// DialTimeoutsFunc defines the dail func that the client uses to connect to Redis
+type DialTimeoutsFunc func(network, addr string, timeouts Timeouts) (*Client, error)
+
 // Dial connects to the given Redis server with the given timeout, which will be
 // used as the read/write timeout when communicating with redis
 func DialTimeout(network, addr string, timeout time.Duration) (*Client, error) {

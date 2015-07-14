@@ -119,6 +119,8 @@ type Client struct {
 	masterPools  map[string]*pool.Pool
 	subClient    *pubsub.SubClient
 
+	poolDialFunc pool.DialFunc
+
 	getCh   chan *getReq
 	putCh   chan *putReq
 	closeCh chan struct{}
@@ -147,30 +149,64 @@ func NewClient(network, address string, poolSize int, names ...string) (*Client,
 
 	return NewClientWithLogger(
 		logging.NewNilLogger(), network, address,
-		sentinelTimeouts, redisTimeouts, heartbeatPeriod,
-		poolSize, poolSize, names...)
+		sentinelTimeouts, redisTimeouts, redis.DialTimeouts,
+		heartbeatPeriod, poolSize, poolSize, names...)
 }
 
 func NewClientWithLogger(
 	logger logging.SimpleLogger, network, address string,
-	sentinelTimeouts, redisTimeouts redis.Timeouts,
+	sentinelTimeouts, redisTimeouts redis.Timeouts, cdf redis.DialTimeoutsFunc,
 	heartbeatPeriod time.Duration, initPoolSize, poolSize int, names ...string,
 ) (
 	*Client, error,
 ) {
-	prefixedLogger := logging.NewLoggerWithPrefix("[SC]", logger)
-	initLogger := prefixedLogger.WithAnotherPrefix("[init]")
+	c := &Client{
+		initPoolSize: initPoolSize,
+		poolSize:     poolSize,
+
+		getCh:          make(chan *getReq),
+		putCh:          make(chan *putReq),
+		closeCh:        make(chan struct{}),
+		alwaysErrCh:    make(chan *ClientError),
+		switchMasterCh: make(chan *switchMaster),
+
+		logger: logging.NewLoggerWithPrefix("[SC]", logger),
+		reqId:  newReqId(),
+
+		redisTimeouts:    redisTimeouts,
+		sentinelTimeouts: sentinelTimeouts,
+
+		alwaysErrFlag: &AtomicFlag{},
+	}
+
+	// setup loggers
+	initLogger := c.logger.WithAnotherPrefix("[init]")
+	redisConnectionLogger := c.logger.WithAnotherPrefix("[Pool]")
+
+	// setup dial func
+	if cdf == nil {
+		// default to the general dial funcs
+		cdf = redis.DialTimeouts
+	}
+	c.poolDialFunc = func(network, addr string) (*redis.Client, error) {
+		startTime := time.Now()
+		defer func() {
+			redisConnectionLogger.Debugf("Established new Redis connection(%s:%s) in %s", network, addr, time.Since(startTime))
+		}()
+
+		return cdf(network, addr, c.redisTimeouts)
+	}
 
 	initLogger.Infof("Setting up with network:%s, addr:%s, masterNames:%v, sentinelTimeouts:%v, "+
 		"redisTimeouts:%v, initPoolSize:%d, softMaxPoolSize:%d",
-		network, address, names, sentinelTimeouts, redisTimeouts, initPoolSize, poolSize)
+		network, address, names, c.sentinelTimeouts, c.redisTimeouts, c.initPoolSize, c.poolSize)
 
 	//
 	// Connect to sentinel
 	// We use this to fetch initial details about masters before we upgrade it
 	// to a pubsub client
 	initLogger.Infof("Connecting to Sentinel with addr: '%s'", address)
-	client, err := redis.DialTimeouts(network, address, sentinelTimeouts)
+	client, err := redis.DialTimeouts(network, address, c.sentinelTimeouts)
 	if err != nil {
 		initLogger.Infof("Connecting to sentinel with addr='%s' errored: %v", address, err)
 		return nil, &ClientError{err: err}
@@ -179,7 +215,7 @@ func NewClientWithLogger(
 
 	//
 	// Setup connection pools for all redis masters
-	masterPools := map[string]*pool.Pool{}
+	c.masterPools = map[string]*pool.Pool{}
 	for _, name := range names {
 		initLogger.Infof("Initializing connection pool for redis master '%s'", name)
 		r := client.Cmd("SENTINEL", "MASTER", name)
@@ -193,39 +229,30 @@ func NewClientWithLogger(
 
 		initLogger.Infof("Setting up Redis Connection Pool with addr: '%s'", addr)
 
-		redisConnectionLogger := prefixedLogger.WithAnotherPrefix("[Pool]")
-		df := func(network, addr string) (*redis.Client, error) {
-			startTime := time.Now()
-			defer func() {
-				redisConnectionLogger.Debugf("Established new Redis connection in %s", time.Since(startTime))
-			}()
-
-			return redis.DialTimeouts(network, addr, redisTimeouts)
-		}
-		pool, err := pool.NewCustomPool("tcp", addr, initPoolSize, poolSize, df)
+		pool, err := pool.NewCustomPool("tcp", addr, initPoolSize, poolSize, c.poolDialFunc)
 
 		if err != nil {
 			client.Close()
 			initLogger.Infof("Init redis connection pool for redis master '%s' errored: %v", addr, err)
 			return nil, &ClientError{err: err}
 		}
-		masterPools[name] = pool
+		c.masterPools[name] = pool
 	}
 
 	//
 	// Upgrade sentinel client connection to pubSub Client
 	initLogger.Infof("Subscribing to +switch-master events")
-	subClient := pubsub.NewSubClient(client)
+	c.subClient = pubsub.NewSubClient(client)
 
 	// TODO: seems like a race condition. What if redis switched between the SENTINEL MASTER command
 	// and this command?
-	r := subClient.Subscribe("+switch-master")
+	r := c.subClient.Subscribe("+switch-master")
 	if r.Err != nil {
 		client.Close()
 
-		for name := range masterPools {
+		for name := range c.masterPools {
 			initLogger.Infof("Emptying master pool %s", name)
-			masterPools[name].Empty()
+			c.masterPools[name].Empty()
 		}
 
 		initLogger.Infof("Subscribe call to +switch-master errored: %v", err)
@@ -234,28 +261,8 @@ func NewClientWithLogger(
 
 	// Clear read timeouts since otherwise we run into the risk to hit a deadline
 	// while reading.
-	subClient.Client.ChangeReadTimeout(time.Duration(0))
+	c.subClient.Client.ChangeReadTimeout(time.Duration(0))
 	initLogger.Infof("Subscribed to +switch-master events")
-
-	c := &Client{
-		initPoolSize:   initPoolSize,
-		poolSize:       poolSize,
-		masterPools:    masterPools,
-		subClient:      subClient,
-		getCh:          make(chan *getReq),
-		putCh:          make(chan *putReq),
-		closeCh:        make(chan struct{}),
-		alwaysErrCh:    make(chan *ClientError),
-		switchMasterCh: make(chan *switchMaster),
-
-		logger: prefixedLogger,
-		reqId:  newReqId(),
-
-		redisTimeouts:    redisTimeouts,
-		sentinelTimeouts: sentinelTimeouts,
-
-		alwaysErrFlag: &AtomicFlag{},
-	}
 
 	if heartbeatPeriod > 0 {
 		go c.subSendHeartbeatsSpin(heartbeatPeriod)
@@ -441,11 +448,7 @@ func (c *Client) spin() {
 
 				logger.Infof("Initializing new master pool for '%s' and timeouts: %v", sm.name, c.redisTimeouts)
 
-				df := func(network, addr string) (*redis.Client, error) {
-					return redis.DialTimeouts(network, addr, c.redisTimeouts)
-				}
-
-				p = pool.NewOrEmptyCustomPool("tcp", sm.addr, c.initPoolSize, c.poolSize, df)
+				p = pool.NewOrEmptyCustomPool("tcp", sm.addr, c.initPoolSize, c.poolSize, c.poolDialFunc)
 
 				c.masterPools[sm.name] = p
 				logger.Infof("Completed master switch for '%s' master with addr: '%s'",
