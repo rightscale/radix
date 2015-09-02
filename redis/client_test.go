@@ -3,9 +3,10 @@ package redis
 import (
 	"bufio"
 	"bytes"
-	"github.com/stretchr/testify/assert"
 	. "testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func dial(t *T) *Client {
@@ -66,6 +67,11 @@ func TestParse(t *T) {
 	r = parseString("-ERR unknown command 'foobar'\r\n")
 	assert.Equal(t, ErrorReply, r.Type)
 	assert.Equal(t, "ERR unknown command 'foobar'", r.Err.Error())
+
+	// wrongtype reply
+	r = parseString("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
+	assert.Equal(t, ErrorReply, r.Type)
+	assert.Equal(t, "WRONGTYPE Operation against a key holding the wrong kind of value", r.Err.Error())
 
 	// LOADING error
 	r = parseString("-LOADING Redis is loading the dataset in memory\r\n")
